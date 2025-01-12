@@ -17,12 +17,21 @@ type Server struct {
 	// NGPUs is the number of GPUs on this server.
 	NGPUs int
 
-	// Used is the number of GPUs current being used.
-	Used int `edit:"-" toml:"-"`
+	// Used is a map of GPUs current being used.
+	Used map[int]bool `edit:"-" toml:"-"`
+}
+
+// ServerAvail is used to report the number of available gpus per server.
+type ServerAvail struct {
+	Name  string
+	Avail int
 }
 
 // OpenSSH opens the SSH connection for this server.
 func (sv *Server) OpenSSH() {
+	if sv.Used == nil {
+		sv.Used = make(map[int]bool)
+	}
 	goalrun.Run("gossh", sv.SSH, sv.Name)
 }
 
@@ -34,4 +43,40 @@ func (sv *Server) ID() string {
 // Use makes this the active server.
 func (sv *Server) Use() {
 	goalrun.Run(sv.ID())
+}
+
+// Avail returns the number of servers available.
+func (sv *Server) Avail() int {
+	return sv.NGPUs - len(sv.Used)
+}
+
+// AvailableGPUs returns the number of GPUs available on servers.
+// Only includes servers with availability (nil if nothing avail).
+func (bm *BareMetal) AvailableGPUs() []ServerAvail {
+	var avail []ServerAvail
+	for _, sv := range bm.Servers.Values {
+		na := sv.Avail()
+		if na > 0 {
+			avail = append(avail, ServerAvail{Name: sv.Name, Avail: na})
+		}
+	}
+	return avail
+}
+
+// NextGPU returns the next GPU index available,
+// and adds it to the Used list. Returns -1 if none available.
+func (sv *Server) NextGPU() int {
+	for i := range sv.NGPUs {
+		_, used := sv.Used[i]
+		if !used {
+			sv.Used[i] = true
+			return i
+		}
+	}
+	return -1
+}
+
+// FreeGPU makes the given GPU number available.
+func (sv *Server) FreeGPU(gpu int) {
+	delete(sv.Used, gpu)
 }
