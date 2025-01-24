@@ -224,6 +224,6 @@ type Result struct {
 }
 
 // EditConfig edits the configuration
-func (sr *SimRun) EditConfig() { //types:add
+func (sr *Simmer) EditConfig() { //types:add
 	lab.PromptStruct(sr, &sr.Config, "Configuration parameters", nil)
 }
