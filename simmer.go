@@ -1,4 +1,4 @@
-// Copyright (c) 2024, Cogent Lab. All rights reserved.
+// Copyright (c) 2024, Cogent Core. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -26,7 +26,7 @@ import (
 	"cogentcore.org/lab/lab"
 	"cogentcore.org/lab/table"
 	"cogentcore.org/lab/tensorcore"
-	"cogentcore.org/lab/yaegilab/gui"
+	"cogentcore.org/lab/yaegilab/labsymbols"
 	"github.com/cogentcore/yaegi/interp"
 )
 
@@ -48,10 +48,10 @@ Start, string
 End, string
 `
 
-// SimRun manages the running and data analysis of results from simulations
+// Simmer manages the running and data analysis of results from simulations
 // that are run on remote server(s), within a Cogent Lab browser environment,
 // with the files as the left panel, and the Tabber as the right panel.
-type SimRun struct {
+type Simmer struct {
 	core.Frame
 	lab.Browser
 
@@ -70,17 +70,18 @@ type SimRun struct {
 	// ResultsList is the list of result records.
 	ResultsList []*Result
 
-	// for now including directly -- will be rpc
-	BareMetal *baremetal.BareMetal
+	// BareMetal RPC client.
+	BareMetal *baremetal.Client
 
+	// Status info from BareMetal
+	BareMetalActive      []*baremetal.Job
 	BareMetalActiveTable *core.Table
-	BareMetalDoneTable   *core.Table
 }
 
 // important: must be run from an interactive terminal.
 // Will quit immediately if not!
 func main() {
-	opts := cli.DefaultOptions("simrun", "interactive simulation running and data analysis.")
+	opts := cli.DefaultOptions("simmer", "interactive simulation running and data analysis.")
 	cfg := &interpreter.Config{}
 	cfg.InteractiveFunc = Interactive
 	cli.Run(opts, cfg, interpreter.Run, interpreter.Build)
@@ -88,7 +89,7 @@ func main() {
 
 // Interactive is the cli function that gets called by default at gui startup.
 func Interactive(c *interpreter.Config, in *interpreter.Interpreter) error {
-	b, _ := NewSimRunWindow(in)
+	b, _ := NewSimmerWindow(in)
 	b.OnShow(func(e events.Event) {
 		// note: comment out if not running interactively (e.g., debugger)
 		go func() {
@@ -103,33 +104,33 @@ func Interactive(c *interpreter.Config, in *interpreter.Interpreter) error {
 	return nil
 }
 
-// NewSimRunWindow returns a new SimRun window using given interpreter.
+// NewSimmerWindow returns a new Simmer window using given interpreter.
 // do RunWindow on resulting [core.Body] to open the window.
-func NewSimRunWindow(in *interpreter.Interpreter) (*core.Body, *SimRun) {
+func NewSimmerWindow(in *interpreter.Interpreter) (*core.Body, *Simmer) {
 	startDir, _ := os.Getwd()
 	startDir = errors.Log1(filepath.Abs(startDir))
-	b := core.NewBody("SimRun: " + fsx.DirAndFile(startDir))
-	sr := NewSimRun(b)
+	b := core.NewBody("Simmer: " + fsx.DirAndFile(startDir))
+	sr := NewSimmer(b)
 	sr.Interpreter = in
 	b.AddTopBar(func(bar *core.Frame) {
 		tb := core.NewToolbar(bar)
 		sr.Toolbar = tb
 		tb.Maker(sr.MakeToolbar)
 	})
-	sr.InitSimRun(startDir)
+	sr.InitSimmer(startDir)
 	return b, sr
 }
 
-// InitSimRun initializes the simrun configuration and data
+// InitSimmer initializes the simmer configuration and data
 // for given starting directory, which should be the main github
 // current working directory for the simulation being run.
-// All the simrun data is contained within a "simdata" directory
+// All the simmer data is contained within a "simdata" directory
 // under the startDir: this dir is typically a symbolic link
 // to a common collection of such simdata directories for all
 // the different simulations being run.
 // The goal Interpreter is typically already set by this point
 // but will be created if not.
-func (sr *SimRun) InitSimRun(startDir string) {
+func (sr *Simmer) InitSimmer(startDir string) {
 	sr.StartDir = startDir
 	ddr := errors.Log1(filepath.Abs("simdata"))
 	sr.SetDataRoot(ddr)
@@ -138,16 +139,16 @@ func (sr *SimRun) InitSimRun(startDir string) {
 	}
 	in := sr.Interpreter
 	in.Interp.Use(coresymbols.Symbols) // gui imports
-	in.Interp.Use(gui.Symbols)         // gui imports
+	in.Interp.Use(labsymbols.Symbols)
 	in.Interp.Use(interp.Exports{
 		"cogentcore.org/lab/lab/lab": map[string]reflect.Value{
-			"LabBrowser": reflect.ValueOf(sr), // our SimRun is available as lab.Lab
+			"LabBrowser": reflect.ValueOf(sr), // our Simmer is available as lab.Lab
 		},
 	})
 	in.Config()
 	sr.SetScriptsDir(filepath.Join(sr.DataRoot, "labscripts"))
-	lab.TheBrowser = &sr.Browser
-	lab.CurTabber = sr.Browser.Tabs
+	lab.LabBrowser = &sr.Browser
+	lab.Lab = sr.Browser.Tabs
 	goalrun = in.Goal
 	sr.Config.StartDir = sr.StartDir
 	sr.Config.DataRoot = sr.DataRoot
@@ -156,12 +157,15 @@ func (sr *SimRun) InitSimRun(startDir string) {
 	sr.UpdateScripts() // automatically runs lowercase init scripts
 
 	if !sr.IsSlurm() {
-		sr.BareMetal = baremetal.NewBareMetal()
-		sr.BareMetal.Init(in.Goal)
+		sr.BareMetal = baremetal.NewClient()
+		err := sr.BareMetal.Connect()
+		if errors.Log(err) != nil {
+			sr.BareMetal = nil
+		}
 	}
 }
 
-func (sr *SimRun) Init() {
+func (sr *Simmer) Init() {
 	sr.Frame.Init()
 	sr.Styler(func(s *styles.Style) {
 		s.Grow.Set(1, 1)
@@ -194,23 +198,29 @@ func (sr *SimRun) Init() {
 }
 
 // AsyncMessageSnackbar must be used for MessageSnackbar in a goroutine.
-func (sr *SimRun) AsyncMessageSnackbar(message string) {
+func (sr *Simmer) AsyncMessageSnackbar(message string) {
 	sr.AsyncLock()
 	core.MessageSnackbar(sr, message)
 	sr.AsyncUnlock()
 }
 
 // IsSlurm returns true if using slurm (vs. baremetal)
-func (sr *SimRun) IsSlurm() bool {
+func (sr *Simmer) IsSlurm() bool {
 	return sr.Config.Server.Slurm
 }
 
-func (sr *SimRun) MakeToolbar(p *tree.Plan) {
+func (sr *Simmer) MakeToolbar(p *tree.Plan) {
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.UpdateFiles).SetText("").SetIcon(icons.Refresh)
 	})
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.UpdateSims).SetText("Jobs").SetIcon(icons.ViewList).SetShortcut("Command+U")
+	})
+	tree.Add(p, func(w *core.Button) {
+		w.SetText("Bare").SetIcon(icons.Refresh).
+			SetTooltip("Update BareMetal jobs").OnClick(func(e events.Event) {
+			sr.UpdateBare()
+		})
 	})
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.Queue).SetIcon(icons.List)
@@ -225,7 +235,7 @@ func (sr *SimRun) MakeToolbar(p *tree.Plan) {
 		w.SetFunc(sr.Submit).SetIcon(icons.Add)
 	})
 	tree.Add(p, func(w *core.FuncButton) {
-		w.SetFunc(sr.Results).SetIcon(icons.Refresh)
+		w.SetFunc(sr.Results).SetIcon(icons.Open)
 	})
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.Reset).SetIcon(icons.Refresh)
@@ -251,7 +261,7 @@ func (sr *SimRun) MakeToolbar(p *tree.Plan) {
 	tree.Add(p, func(w *core.Button) {
 		w.SetText("README").SetIcon(icons.FileMarkdown).
 			SetTooltip("open README help file").OnClick(func(e events.Event) {
-			core.TheApp.OpenURL("https://github.com/cogentcore/lab/blob/main/examples/simrun/README.md")
+			core.TheApp.OpenURL("https://github.com/cogentcore/lab/blob/main/examples/simmer/README.md")
 		})
 	})
 }
