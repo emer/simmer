@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 
 	"cogentcore.org/core/base/errors"
@@ -61,7 +62,7 @@ func TarFiles(w io.Writer, dir string, gz bool, files ...string) error {
 
 	var errs []error
 	for _, fn := range files {
-		fname := filepath.Join(dir, fn)
+		fname := path.Join(dir, fn)
 		fi, err := os.Stat(fname)
 		if err != nil {
 			errs = append(errs, err)
@@ -128,7 +129,7 @@ func Untar(r io.Reader, dir string, gz bool) error {
 		case hdr == nil:
 			continue
 		}
-		fn := filepath.Join(dir, hdr.Name)
+		fn := path.Join(dir, hdr.Name)
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			err := os.MkdirAll(fn, 0755)
