@@ -1,5 +1,12 @@
 # Simmer: simulation running and monitoring infrastructure
 
+<p align="center">
+    <a href="https://pkg.go.dev/github.com/emer/simmer"><img src="https://img.shields.io/badge/dev-reference-007d9c?logo=go&logoColor=white&style=flat" alt="pkg.go.dev docs"></a>
+    <a href="https://github.com/emer/simmer/actions"><img alt="GitHub Actions Workflow Status" src="https://img.shields.io/github/actions/workflow/status/emer/simmer/go.yml"></a>
+    <a href="https://raw.githack.com/wiki/emer/simmer/coverage.html"><img alt="Test Coverage" src="https://github.com/emer/simmer/wiki/coverage.svg"></a>
+    <a href="https://github.com/emer/simmer/tags"><img alt="Version" src="https://img.shields.io/github/v/tag/emer/simmer?label=version&color=blue"></a>
+</p>
+
 "Watch your sims simmer on the GPU burners.."
 
 Simmer provides a Cogent Lab based GUI for running simulation jobs, and managing and analyzing the resulting data, using the plotcore Editor. It supports both slurm and [baremetal](baremetal) job management systems.
