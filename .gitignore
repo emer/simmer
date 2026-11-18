@@ -32,3 +32,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Built apps and commands
+/simmer
+/Simmer.app/
+/baremetal/cmd/baremetal/baremetal

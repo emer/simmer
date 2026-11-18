@@ -6,9 +6,9 @@ import (
 	"cogentcore.org/core/core"
 	"cogentcore.org/core/tree"
 	"cogentcore.org/core/types"
-	"cogentcore.org/lab/examples/baremetal"
 	"cogentcore.org/lab/table"
 	"cogentcore.org/lab/tensorcore"
+	"github.com/emer/simmer/baremetal"
 )
 
 var _ = types.AddType(&types.Type{Name: "main.FilterResults", IDName: "filter-results", Doc: "FilterResults specifies which results files to open.", Fields: []types.Field{{Name: "FileContains", Doc: "File name contains this string, e.g., \"_epoch\" or \"_run\""}, {Name: "Ext", Doc: "extension of files, e.g., .tsv"}, {Name: "Fetch", Doc: "if true, fetch results before opening."}}})

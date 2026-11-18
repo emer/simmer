@@ -17,8 +17,8 @@ import (
 
 	"cogentcore.org/core/base/errors"
 	"cogentcore.org/core/core"
-	"cogentcore.org/lab/examples/baremetal"
 	"cogentcore.org/lab/goal/goalib"
+	"github.com/emer/simmer/baremetal"
 )
 
 // bare supports the baremetal platform without slurm or other job management infra.

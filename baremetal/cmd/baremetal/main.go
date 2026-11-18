@@ -27,8 +27,8 @@ import (
 	"cogentcore.org/core/events"
 	"cogentcore.org/core/icons"
 	"cogentcore.org/core/text/terminal"
-	"cogentcore.org/lab/examples/baremetal"
-	pb "cogentcore.org/lab/examples/baremetal/baremetal"
+	"github.com/emer/simmer/baremetal"
+	pb "github.com/emer/simmer/baremetal/baremetal"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
 )

@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"cogentcore.org/core/base/errors"
-	pb "cogentcore.org/lab/examples/baremetal/baremetal"
+	pb "github.com/emer/simmer/baremetal/baremetal"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"

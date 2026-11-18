@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	pb "cogentcore.org/lab/examples/baremetal/baremetal"
+	pb "github.com/emer/simmer/baremetal/baremetal"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"

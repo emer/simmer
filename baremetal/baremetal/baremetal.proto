@@ -4,7 +4,7 @@ package baremetal;
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
 
-option go_package = "cogentcore.org/lab/examples/baremetal/baremetal";
+option go_package = "github.com/emer/simmer/baremetal/baremetal";
 
 service BareMetal {
   rpc Submit (Submission) returns (Job);

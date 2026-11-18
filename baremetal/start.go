@@ -100,7 +100,7 @@ func ServerExecutable() (string, error) {
 		exe += ".exe"
 	}
 	if _, err := os.Stat(exe); err != nil {
-		return "", fmt.Errorf("baremetal server executable not found on the PATH or in %s: install it with go install cogentcore.org/lab/examples/baremetal/cmd/baremetal@latest", bin)
+		return "", fmt.Errorf("baremetal server executable not found on the PATH or in %s: install it with go install github.com/emer/simmer/baremetal/cmd/baremetal@latest", bin)
 	}
 	return exe, nil
 }

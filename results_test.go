@@ -27,7 +27,7 @@ func TestPlotMean(t *testing.T) {
 	// In a test, the main package is named by its import path, so the type
 	// is added under that name too, for the FuncButton to find its methods.
 	typ := *types.TypeByName("main.Simmer")
-	typ.Name = "cogentcore.org/lab/examples/simmer.Simmer"
+	typ.Name = "github.com/emer/simmer.Simmer"
 	types.AddType(&typ)
 	t.Setenv("HOME", t.TempDir())
 	homedir.Reset()

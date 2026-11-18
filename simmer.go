@@ -22,7 +22,6 @@ import (
 	"cogentcore.org/core/icons"
 	"cogentcore.org/core/styles"
 	"cogentcore.org/core/tree"
-	"cogentcore.org/lab/examples/baremetal"
 	"cogentcore.org/lab/goal"
 	"cogentcore.org/lab/goal/interpreter"
 	"cogentcore.org/lab/lab"
@@ -32,6 +31,7 @@ import (
 	"cogentcore.org/lab/mvmlab/labsymbols"
 	"cogentcore.org/lab/table"
 	"cogentcore.org/lab/tensorcore"
+	"github.com/emer/simmer/baremetal"
 )
 
 // goalrun is needed for running goal commands.
