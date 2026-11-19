@@ -3,7 +3,7 @@ module github.com/emer/simmer
 go 1.27.0
 
 require (
-	cogentcore.org/core v0.5.44
+	cogentcore.org/core v0.5.45
 	cogentcore.org/lab v0.2.21
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/stretchr/testify v1.12.1
