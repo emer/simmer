@@ -85,11 +85,13 @@ func TestTerminalServer(t *testing.T) {
 		tm.Run(cmd)
 		b.AsyncUnlock()
 	}
-	waitFor("the prompt", func(s string) bool { return strings.Contains(s, "> ") })
+	// the prompts end in " > ": they are found by the space before the ">",
+	// as the one after it can be missing (for some lengths of the prompt)
+	waitFor("the prompt", func(s string) bool { return strings.Contains(s, " >") })
 	// the input of the terminal goes to the command on the server while it
 	// runs, so the prompt after it is waited for
 	prompt := func(n int) func(s string) bool {
-		return func(s string) bool { return strings.Count(s, "> ") >= n }
+		return func(s string) bool { return strings.Count(s, " >") >= n }
 	}
 	run("@1 cat onserver.txt")
 	waitFor("the server output", func(s string) bool { return strings.Contains(s, "hello from server") })
