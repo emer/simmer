@@ -444,8 +444,11 @@ func (bm *BareMetal) setServerUsedFromJobs() error {
 // recoverJob attempts to recover the job information 
 // from given job, using remote or local data.
 func (bm *BareMetal) recoverJob(job *Job) (*Job, error) {
-	// do we need to do anything actually?
 	bm.Active.Add(job.ID, job)
+	// the GPU of a running job is in use, so that no other job is run on it
+	if sv, err := bm.Server(job.ServerName); err == nil && job.Status == Running && job.ServerGPU >= 0 {
+		sv.Used[job.ServerGPU] = true
+	}
 	bm.saveState()
 	return job, nil
 }
