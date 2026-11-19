@@ -7,6 +7,7 @@ package baremetal
 //go:generate core generate
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"os/user"
@@ -16,9 +17,9 @@ import (
 
 	"cogentcore.org/core/base/errors"
 	"cogentcore.org/core/base/fsx"
-	"cogentcore.org/core/base/iox/jsonx"
 	"cogentcore.org/core/base/iox/tomlx"
 	"cogentcore.org/core/base/keylist"
+	"cogentcore.org/core/base/sharedfile"
 	"cogentcore.org/lab/goal"
 	"cogentcore.org/lab/goal/goalib"
 	"cogentcore.org/lab/goal/interpreter"
@@ -114,38 +115,62 @@ func (bm *BareMetal) config() {
 	bm.updateServerIndexes()
 }
 
-// saveState saves the current active state to a JSON file:
-// TheApp.DataDir()/BareMetal/state.json  A backup ~ file is
-// made of any existing prior to saving.
-func (bm *BareMetal) saveState() {
-	dir := filepath.Join(bm.dataDir(), "BareMetal")
-	os.MkdirAll(dir, 0777)
-	file := filepath.Join(dir, "state.json")
-	bkup := filepath.Join(dir, "state.json~")
-	bkup2 := filepath.Join(dir, "#state.json#")
-	if goalib.FileExists(file) {
-		if goalib.FileExists(bkup) {
-			os.Rename(bkup, bkup2)
-		}
-		os.Rename(file, bkup)
-	}
-	err := jsonx.Save(bm, file)
-	if err != nil {
-		fsx.CopyFile(bkup, filepath.Join(dir, "state_pre_err.json"), 0666)
-		panic(err)
-	}
-	os.Remove(bkup2)
+// stateFile returns the path of the state.json file of the jobs.
+func (bm *BareMetal) stateFile() string {
+	return filepath.Join(bm.dataDir(), "BareMetal", "state.json")
 }
 
-// openState opens the current active state from the file made by SaveState,
-// to restore to prior running state.
-func (bm *BareMetal) openState() {
-	dir := filepath.Join(bm.dataDir(), "BareMetal")
-	file := filepath.Join(dir, "state.json")
-	if !goalib.FileExists(file) {
+// saveState saves the current active state to a JSON file:
+// TheApp.DataDir()/BareMetal/state.json. It is written whole to a temporary
+// file that is then renamed into place, with a lock file held (see
+// [sharedfile.Lock]), so that the file is never partially written, as when
+// the process is killed while saving. A backup copy of the prior file is
+// kept in state.json~, which [BareMetal.openState] uses if needed.
+func (bm *BareMetal) saveState() {
+	file := bm.stateFile()
+	os.MkdirAll(filepath.Dir(file), 0777)
+	unlock, err := sharedfile.Lock(file + ".lck")
+	if errors.Log(err) != nil {
+		return // saved next time
+	}
+	defer unlock()
+	b, err := json.MarshalIndent(bm, "", "\t")
+	if errors.Log(err) != nil {
 		return
 	}
-	errors.Log(jsonx.Open(bm, file))
+
+	// the backup is a copy, so that the state file always exists
+	if goalib.FileExists(file) {
+		errors.Log(fsx.CopyFile(file+"~", file, 0666))
+	}
+	tmp := file + ".tmp"
+	if errors.Log(os.WriteFile(tmp, b, 0666)) != nil {
+		return
+	}
+	if errors.Log(os.Rename(tmp, file)) != nil {
+		os.Remove(tmp)
+	}
+}
+
+// openState opens the current active state from the file made by
+// [BareMetal.saveState], to restore to prior running state. If it cannot be
+// read, as when it was truncated by a prior version, the backup is used.
+func (bm *BareMetal) openState() {
+	file := bm.stateFile()
+	for _, fn := range []string{file, file + "~"} {
+		if !goalib.FileExists(fn) {
+			continue
+		}
+		b, err := os.ReadFile(fn)
+		if err == nil {
+			st := &BareMetal{}
+			if err = json.Unmarshal(b, st); err == nil {
+				bm.NextID, bm.Active, bm.Done = st.NextID, st.Active, st.Done
+				break
+			}
+		}
+		slog.Error("BareMetal: could not read the state file", "file", fn, "err", err)
+	}
 	bm.updateServerIndexes()
 	bm.Active.UpdateIndexes()
 	bm.Done.UpdateIndexes()
