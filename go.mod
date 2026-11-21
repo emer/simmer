@@ -3,8 +3,8 @@ module github.com/emer/simmer
 go 1.27.0
 
 require (
-	cogentcore.org/core v0.5.45
-	cogentcore.org/lab v0.2.21
+	cogentcore.org/core v0.5.48
+	cogentcore.org/lab v0.2.23
 	github.com/mitchellh/go-homedir v1.1.0
 	github.com/stretchr/testify v1.12.1
 	google.golang.org/grpc v1.85.0
@@ -30,8 +30,8 @@ require (
 	github.com/chewxy/math32 v1.11.2 // indirect
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
-	github.com/cogentcore/mvm v0.0.0-20261026193832-5ebd19c3fa21 // indirect
-	github.com/cogentcore/readline v0.1.3 // indirect
+	github.com/cogentcore/mvm v0.0.0-20261120030535-e3f31e8a9ab5 // indirect
+	github.com/cogentcore/readline v0.1.4-0.20261119092756-95afccb36c85 // indirect
 	github.com/cogentcore/typesetting v0.0.0-20261022123550-2cd93a91580e // indirect
 	github.com/creack/pty v1.1.24 // indirect
 	github.com/dlclark/regexp2/v2 v2.7.1 // indirect
