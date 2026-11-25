@@ -170,6 +170,8 @@ func (sr *Simmer) InitSimmer() {
 	lab.LabBrowser = &sr.Browser
 	lab.Lab = sr.Browser.Tabs
 	goalrun = in.Goal
+	// kubesh: a shell in the helper pod, on the shared volume of the jobs
+	goalrun.AddCommand("kubesh", sr.kubeShell)
 	sr.JobsTable = table.New()
 
 	// used for the projects that are not slurm

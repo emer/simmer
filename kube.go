@@ -276,6 +276,31 @@ func (sr *Simmer) kubeExecFrom(script, file string) error {
 	return goalError()
 }
 
+// kubeShell is the kubesh command of the terminal: it runs an interactive
+// shell (sh) in the helper pod, in the jobs directory of the project on
+// the shared volume, or, with args, runs them there as a sh command.
+func (sr *Simmer) kubeShell(args ...string) {
+	if st := sr.Project.Server.Server; st != Kube && st != Astera {
+		fmt.Println("kubesh: the server of the project is not Kube or Astera")
+		return
+	}
+	sr.kubeStart()
+	pod, err := sr.kubeHelper()
+	if err != nil {
+		fmt.Println("kubesh:", err)
+		return
+	}
+	ns := sr.kubeNamespace()
+	cd := "cd " + shq(path.Dir(sr.KubeJobPath("_"))) + " 2>/dev/null; "
+	if len(args) > 0 {
+		cmd := cd + strings.Join(args, " ")
+		goalrun.Run("kubectl", "-n", ns, "exec", pod, "--", "sh", "-c", cmd, "<", "/dev/null")
+		return
+	}
+	sh := cd + "exec sh"
+	goalrun.Run("kubectl", "-n", ns, "exec", "-it", pod, "--", "sh", "-c", sh)
+}
+
 // shq quotes s for sh.
 func shq(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
