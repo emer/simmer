@@ -46,6 +46,26 @@ baremetal can be run on localhost to manage jobs on your own local machine, usin
 	NGPUs = 4
 ```
 
+## Kubernetes
+
+With `Server.Kube` set, jobs run on a Kubernetes cluster as [actl](https://actl.astera.sh) Queue Entries (see `kube.go`), like slurm array jobs: each job is one Entry, with one worker per run (`Job.NRuns`, with `Job.GPUs`, `Job.CPUsPerTask` and `Job.Memory` per CPU), which runs its run number (`-run $ACTL_WORKER_RANK -runs 1`). It needs `actl` set up (`actl start`), and these `Server.K8s` settings:
+
+```json
+"Server": {"Name": "astera", "Kube": true,
+	"K8s": {"Namespace": "randy", "Image": "harbor.astera.sh/randy-snapshots/simmer-go:1.27.2",
+		"ServiceAccount": "simmer"}}
+```
+
+* The job directory is uploaded as the source of the Entry (with the `job.sbatch` worker script and the `actl-queue.yaml` Entry config that simmer writes there). Worker 0 copies the job files there and builds the sim once for all (with the Go caches on the shared volume, output in `job.build`), and each worker runs it in the results directory of the job on the shared volume (`K8s.SharedPVC`, `<namespace>-shared` by default): `/mnt/<pvc>/simserver/<sim>/<user>/jobs/<job>`, so the results are there while it runs, and are kept after the Entry is deleted.
+
+* Each run writes `job.<run>.start`, `job.<run>.out` (the output of the sim, or the error of a failed build) and `job.<run>.exit` (its exit status), and `Status` is from these files: `Pending`, `Running:n`, `Done`, or `Failed:n` when n runs failed. `Fetch` also gets `job.build` and the `job.<run>.out` files.
+
+* `Status` and `Fetch` read the shared volume through a small helper pod, `simmer-<user>-<pvc>`, which mounts it (alpine, `sleep infinity`), with `kubectl exec`. Simmer creates it when it is not running. Delete it with `kubectl delete pod -n <namespace> simmer-<user>-<pvc>` when it is not needed.
+
+* `Cancel` deletes the Entry (`actl queue delete`); `Delete` and `Archive` also delete the results on the shared volume. `Queue` shows `actl queue list` and `actl queue pools`.
+
+* The [docker](docker) directory has the Dockerfile of the image, with Go and Vulkan, and how to build it in the cluster and give the workers access to it (`K8s.ServiceAccount`).
+
 # Workflow
 
 * `Jobs` shows current jobs in a Jobs tab.

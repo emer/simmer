@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -33,7 +34,7 @@ import (
 // the Status function.
 func (sr *Simmer) Jobs() { //types:add
 	ts := sr.Tabs.AsLab()
-	if !sr.IsSlurm() {
+	if sr.Project.Server.Server == BareMetal {
 		// todo: get data back from server
 		errors.Log(sr.connectBareMetal())
 		sr.BareMetalActive = errors.Log1(sr.BareMetal.JobStatus())
@@ -141,9 +142,12 @@ func (sr *Simmer) ValueForJob(jid, column string) string {
 
 // Queue runs a queue query command on the server and shows the results.
 func (sr *Simmer) Queue() { //types:add
-	if sr.IsSlurm() {
+	switch sr.Project.Server.Server {
+	case Slurm:
 		sr.QueueSlurm()
-	} else {
+	case Kube:
+		sr.QueueKube()
+	default: // BareMetal
 		sr.QueueBare()
 	}
 }
@@ -166,7 +170,8 @@ func (sr *Simmer) JobStatus(jid string, force bool) {
 	if !force && (sstat == "Finalized" || sstat == "Fetched" || sstat == "Canceled") {
 		return
 	}
-	if sr.IsSlurm() {
+	switch sr.Project.Server.Server {
+	case Slurm:
 		goalrun.Run("@1")
 		goalrun.Run("cd")
 		goalrun.Run("cd", spath)
@@ -196,7 +201,7 @@ func (sr *Simmer) JobStatus(jid string, force bool) {
 		core.MessageSnackbar(sr, "Retrieving job files for: "+jid)
 		jfiles := goalrun.Output("@1", "/bin/ls", "-1", "job.*")
 		for _, jf := range goalib.SplitLines(jfiles) {
-			if !sr.IsSlurm() && jf == "job.status" {
+			if sr.Project.Server.Server != Slurm && jf == "job.status" {
 				continue
 			}
 			// fmt.Println(jf)
@@ -205,7 +210,9 @@ func (sr *Simmer) JobStatus(jid string, force bool) {
 				goalrun.Run("scp", rfn, jf)
 			}
 		}
-	} else {
+	case Kube:
+		sstat = sr.JobStatusKube(jid)
+	default: // BareMetal
 		jstr := strings.TrimSpace(goalrun.OutputErrOK("cat", "job.job"))
 		if jstr == "" {
 			msg := fmt.Sprintf("Status for Job: %s: job.job is empty, so can't proceed with BareMetal", jid)
@@ -248,7 +255,7 @@ func (sr *Simmer) JobStatus(jid string, force bool) {
 	if sstat == "Done" || sstat == "Completed" {
 		sstat = "Finalized"
 		goalib.WriteFile("job.status", sstat)
-		if sr.IsSlurm() {
+		if sr.Project.Server.Server == Slurm {
 			goalrun.RunErrOK("/bin/rm", "job.*.out")
 		}
 		sr.FetchJob(jid, false)
@@ -312,9 +319,12 @@ func (sr *Simmer) Status() { //types:add
 // if force == true then will re-get already-Fetched jobs,
 // otherwise these are skipped.
 func (sr *Simmer) FetchJob(jid string, force bool) {
-	if sr.IsSlurm() {
+	switch sr.Project.Server.Server {
+	case Slurm:
 		sr.FetchJobSlurm(jid, force)
-	} else {
+	case Kube:
+		sr.FetchJobKube(jid, force)
+	default: // BareMetal
 		sr.FetchJobBare(jid, force)
 	}
 }
@@ -349,9 +359,14 @@ func (sr *Simmer) Cancel() { //types:add
 		return
 	}
 	lab.PromptOKCancel(sr, "Ok to cancel these jobs: "+strings.Join(jobs, " "), func() {
-		if sr.IsSlurm() {
+		switch sr.Project.Server.Server {
+		case Slurm:
 			sr.CancelJobsSlurm(jobs)
-		} else {
+		case Kube:
+			if err := sr.CancelJobsKube(jobs); err != nil {
+				core.ErrorSnackbar(sr, err)
+			}
+		default: // BareMetal
 			if err := sr.CancelJobsBare(jobs); err != nil {
 				core.ErrorSnackbar(sr, err)
 			}
@@ -367,19 +382,30 @@ func (sr *Simmer) Cancel() { //types:add
 // the canceled jobs, if any.
 func (sr *Simmer) cancelActiveJobs(jobs []string, action string) (others []string, msg string) {
 	var active []string
-	if sr.IsSlurm() {
+	switch sr.Project.Server.Server {
+	case Slurm:
 		active, others = sr.activeJobsSlurm(jobs)
-	} else {
+	case Kube:
+		active, others = sr.activeJobsKube(jobs)
+	default: // BareMetal
 		active, others = sr.activeJobsBare(jobs)
 	}
 	if len(active) == 0 {
 		return others, ""
 	}
-	if sr.IsSlurm() {
+	switch sr.Project.Server.Server {
+	case Slurm:
 		sr.CancelJobsSlurm(active)
-	} else if err := sr.CancelJobsBare(active); err != nil {
-		msg = fmt.Sprintf("Running jobs were not %s, and could not be canceled: %s: %v", action, strings.Join(active, " "), err)
-		return others, msg
+	case Kube:
+		if err := sr.CancelJobsKube(active); err != nil {
+			msg = fmt.Sprintf("Running jobs were not %s, and could not be canceled: %s: %v", action, strings.Join(active, " "), err)
+			return others, msg
+		}
+	default: // BareMetal
+		if err := sr.CancelJobsBare(active); err != nil {
+			msg = fmt.Sprintf("Running jobs were not %s, and could not be canceled: %s: %v", action, strings.Join(active, " "), err)
+			return others, msg
+		}
 	}
 	msg = fmt.Sprintf("Running jobs were canceled instead of %s (do it once they are canceled): %s", action, strings.Join(active, " "))
 	return others, msg
@@ -398,6 +424,16 @@ func (sr *Simmer) DeleteJobs(jobs []string) {
 	}
 	goalrun.Run("@0")
 	dpath := filepath.Join(sr.DataRoot, "jobs")
+	if sr.Project.Server.Server == Kube {
+		if err := sr.DeleteJobsKube(jobs); err != nil {
+			core.ErrorSnackbar(sr, err)
+		}
+		for _, jid := range jobs {
+			os.RemoveAll(filepath.Join(dpath, jid))
+		}
+		core.MessageSnackbar(sr, "Done deleting jobs")
+		return
+	}
 	spath := filepath.Join(sr.Project.Server.Root, "jobs")
 	for _, jid := range jobs {
 		clearErrors() // each job is independent
@@ -446,6 +482,16 @@ func (sr *Simmer) ArchiveJobs(jobs []string) {
 	dpath := filepath.Join(sr.DataRoot, "jobs")
 	apath := filepath.Join(sr.DataRoot, "archive", "jobs")
 	goalrun.Run("mkdir", "-p", apath)
+	if sr.Project.Server.Server == Kube {
+		if err := sr.DeleteJobsKube(jobs); err != nil {
+			core.ErrorSnackbar(sr, err)
+		}
+		for _, jid := range jobs {
+			os.Rename(filepath.Join(dpath, jid), filepath.Join(apath, jid))
+		}
+		core.MessageSnackbar(sr, "Done archiving jobs")
+		return
+	}
 	spath := filepath.Join(sr.Project.Server.Root, "jobs")
 	for _, jid := range jobs {
 		clearErrors() // each job is independent
@@ -490,7 +536,7 @@ func (sr *Simmer) Recover() { //types:add
 		return
 	}
 	lab.PromptOKCancel(sr, "Ok to recover these jobs: "+strings.Join(jobs, " "), func() {
-		// if sr.IsSlurm() {
+		// if sr.Project.Server.Server == Slurm {
 		// 	sr.CancelJobsSlurm(jobs)
 		// } else {
 		sr.RecoverJobsBare(jobs)

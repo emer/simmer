@@ -371,7 +371,7 @@ func (sr *Simmer) connectServer() error {
 // the client connects to it (see [baremetal.Client.StartServer]). It is
 // called before the operations on the baremetal server.
 func (sr *Simmer) connectBareMetal() error {
-	if sr.IsSlurm() || sr.BareMetal == nil || testing.Testing() {
+	if sr.Project.Server.Server != BareMetal || sr.BareMetal == nil || testing.Testing() {
 		return nil
 	}
 	return sr.BareMetal.StartServer()

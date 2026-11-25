@@ -13,6 +13,88 @@ import (
 	"cogentcore.org/lab/table"
 )
 
+// ServerTypes are the types of server backends
+type ServerTypes int32 //enums:enum
+const (
+	// BareMetal uses the simmer/baremetal job manager which runs jobs through
+	// ssh with no job manager on the server.
+	BareMetal ServerTypes = iota
+
+	// Slurm uses the slurm job manager.
+	Slurm
+
+	// Kube runs the jobs on a Kubernetes cluster, as actl Queue Entries
+	// (see kube.go): one Entry per job, with one worker per run
+	// ([JobParams.NRuns]). The SSH server is not used.
+	Kube
+)
+
+// ServerParams are parameters for the server.
+type ServerParams struct {
+
+	// Server specifies the server type to use.
+	Server ServerTypes
+
+	// Name is the name of current server using to run jobs;
+	// gets recorded with each job.
+	Name string
+
+	// Root is the root path from user home dir on server.
+	// is auto-set to: filepath.Join("simserver", Project, User)
+	Root string
+
+	// SSH is the user@host of the server, for the ssh connection to it,
+	// which is @1 in goal commands.
+	SSH string
+
+	// Kubernetes parameters, for Kube.
+	K8s KubeParams `display:"inline"`
+}
+
+// KubeParams are the parameters for running jobs on a Kubernetes
+// cluster through actl Queue Entries (see [ServerParams.K8s]).
+type KubeParams struct {
+
+	// Namespace is the Kubernetes namespace of the jobs, e.g., obelisk.
+	Namespace string
+
+	// Image is the container image that the jobs run in, which must have
+	// Go and Vulkan (see the docker directory), e.g.,
+	// harbor.astera.sh/randy-snapshots/simmer-go:1.27.2
+	Image string `width:"60"`
+
+	// ServiceAccount is the Kubernetes ServiceAccount that the workers
+	// run as, if not the default one of the namespace: one with an
+	// imagePullSecret is needed for an image in a private Harbor project
+	// (see docker/README.md).
+	ServiceAccount string
+
+	// Pool is the actl Queue compute pool, if not the default one
+	// (actl queue pools lists them).
+	Pool string
+
+	// Queue is the actl Queue (KAI) queue, if not the default one.
+	Queue string
+
+	// SharedPVC is the shared volume (RWX) that the results are written to,
+	// at /mnt/SharedPVC/[ServerParams.Root]/jobs/<job>.
+	// Defaults to Namespace-shared.
+	SharedPVC string
+}
+
+func (sp *ServerParams) Defaults() {
+}
+
+func (sp *ServerParams) ShouldDisplay(field string) bool {
+	switch field {
+	case "K8s":
+		return sp.Server == Kube
+	// todo: SSH not for Kube?
+	default:
+		return true
+	}
+}
+
 // FilterResults specifies which results files to open.
 type FilterResults struct {
 	// File name contains this string, e.g., "_epoch" or "_run"
@@ -80,6 +162,9 @@ type JobParams struct {
 
 	// BuildArgs are extra arts to pass during building, such as -tags mpi for mpi
 	BuildArgs string
+
+	// GPUs is the number of GPUs per run, for Kube jobs.
+	GPUs int
 }
 
 func (jp *JobParams) Defaults() {
@@ -89,28 +174,7 @@ func (jp *JobParams) Defaults() {
 	jp.Tasks = 1
 	jp.CPUsPerTask = 8
 	jp.TasksPerNode = 1
-}
-
-// ServerParams are parameters for the server.
-type ServerParams struct {
-
-	// SSH is the user@host of the server, for the ssh connection to it,
-	// which is @1 in goal commands.
-	SSH string
-
-	// Name is the name of current server using to run jobs;
-	// gets recorded with each job.
-	Name string
-
-	// Root is the root path from user home dir on server.
-	// is auto-set to: filepath.Join("simserver", Project, User)
-	Root string
-
-	// Slurm uses the slurm job manager. Otherwise uses a bare job manager.
-	Slurm bool
-}
-
-func (sp *ServerParams) Defaults() {
+	jp.GPUs = 1
 }
 
 // Project holds all of the user-settable parameters of a simulation
@@ -127,7 +191,7 @@ type Project struct {
 	Package string
 
 	// Server has server parameters.
-	Server ServerParams
+	Server ServerParams `display:"add-fields"`
 
 	// Version is the current git version string, from git describe --tags.
 	Version string

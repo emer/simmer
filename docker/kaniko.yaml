@@ -1,0 +1,44 @@
+# Builds the simmer job image in the cluster with kaniko, from the
+# Dockerfile and install.sh in the simmer-image-context ConfigMap, and
+# pushes it with the Harbor robot secret of the namespace (see README.md).
+# Set the destination to the Harbor project of the namespace.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: simmer-image-build
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      initContainers:
+      - name: context
+        image: busybox:1.37
+        command: [sh, -c, "cp -L /cm/* /workspace/"]
+        volumeMounts:
+        - {name: cm, mountPath: /cm}
+        - {name: context, mountPath: /workspace}
+      containers:
+      - name: kaniko
+        image: gcr.io/kaniko-project/executor:v1.23.2
+        args:
+        - --context=dir:///workspace
+        - --dockerfile=/workspace/Dockerfile
+        - --destination=harbor.astera.sh/randy-snapshots/simmer-go:1.27.2
+        - --cache=false
+        resources:
+          requests: {cpu: "2", memory: 4Gi}
+          limits: {cpu: "4", memory: 8Gi}
+        volumeMounts:
+        - {name: context, mountPath: /workspace}
+        - {name: docker, mountPath: /kaniko/.docker}
+      volumes:
+      - name: cm
+        configMap: {name: simmer-image-context}
+      - name: context
+        emptyDir: {}
+      - name: docker
+        secret:
+          secretName: randy-snapshots-robot
+          items: [{key: .dockerconfigjson, path: config.json}]

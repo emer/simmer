@@ -67,7 +67,7 @@ func (sr *Simmer) CopyFilesToJob(localSrc, localJob, hostJob, origProjPath, proj
 	goalrun.Run("@0")
 	goalrun.Run("mkdir", "-p", localJob)
 	goalrun.Run("cd", localJob)
-	if sr.IsSlurm() {
+	if sr.Project.Server.Server == Slurm {
 		goalrun.Run("@1")
 		goalrun.Run("cd")
 		goalrun.Run("mkdir", "-p", hostJob)
@@ -81,7 +81,7 @@ func (sr *Simmer) CopyFilesToJob(localSrc, localJob, hostJob, origProjPath, proj
 		if projPath != "" && strings.HasSuffix(f, ".go") {
 			goalib.ReplaceInFile(f, origProjPath, projPath)
 		}
-		if sr.IsSlurm() {
+		if sr.Project.Server.Server == Slurm {
 			goalrun.Run("scp", f, "@1:"+f)
 		}
 	}
@@ -104,7 +104,7 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 	jpath := sr.JobPath(jid)
 	sr.AsyncMessageSnackbar("Submitting Job: " + jid)
 
-	isSlurm := sr.IsSlurm()
+	isSlurm := sr.Project.Server.Server == Slurm
 
 	gomodDir := sr.FindGoMod(sr.StartDir)
 	subDir := strings.TrimPrefix(sr.StartDir, gomodDir)
@@ -206,14 +206,21 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 		fmt.Println("go.mod file not found!")
 	}
 
-	if isSlurm {
+	switch sr.Project.Server.Server {
+	case Slurm:
 		sid := sr.SubmitSBatch(jid, args)
 		goalib.WriteFile("job.job", sid)
 		fmt.Println("server job id:", sid)
 		goalrun.Run("scp", "job.job", "@1:job.job")
 		sr.AsyncMessageSnackbar("Job: " + jid + " server job: " + sid + " successfully submitted")
 		goalrun.Run("@1", "cd")
-	} else {
+	case Kube:
+		sid := sr.SubmitKube(jid, args)
+		fmt.Println("server job (Entry):", sid)
+		if sid != "" {
+			sr.AsyncMessageSnackbar("Job: " + jid + " Entry: " + sid + " successfully submitted")
+		}
+	default: // BareMetal
 		sid := sr.SubmitBare(jid, args)
 		goalib.WriteFile("job.job", sid)
 		fmt.Println("server job id:", sid)

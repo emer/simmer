@@ -157,7 +157,7 @@ func (sr *Simmer) QueueSlurm() {
 	ts := sr.Tabs.AsLab()
 	goalrun.Run("@1")
 	goalrun.Run("cd")
-	myq := goalrun.Output("squeue", "-l", "-u", "$USER")
+	myq := goalrun.Output("squeue", "-l", "-u", goalrun.Expand("$USER"))
 	sinfoall := goalrun.Output("sinfo")
 	goalrun.Run("@0")
 	sis := []string{}

@@ -220,11 +220,6 @@ func (sr *Simmer) AsyncMessageSnackbar(message string) {
 	sr.AsyncUnlock()
 }
 
-// IsSlurm returns true if using slurm (vs. baremetal)
-func (sr *Simmer) IsSlurm() bool {
-	return sr.Project.Server.Slurm
-}
-
 func (sr *Simmer) MakeToolbar(p *tree.Plan) {
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.UpdateFiles).SetText("").SetIcon(icons.Refresh)
