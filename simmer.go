@@ -248,12 +248,14 @@ func (sr *Simmer) MakeToolbar(p *tree.Plan) {
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.UpdateSims).SetText("Jobs").SetIcon(icons.ViewList).SetShortcut("Command+U")
 	})
-	tree.Add(p, func(w *core.Button) {
-		w.SetText("Bare").SetIcon(icons.Refresh).
-			SetTooltip("Update BareMetal jobs").OnClick(func(e events.Event) {
-			sr.UpdateBare()
+	if sr.Project.Server.Server == BareMetal {
+		tree.Add(p, func(w *core.Button) {
+			w.SetText("Bare").SetIcon(icons.Refresh).
+				SetTooltip("Update BareMetal jobs").OnClick(func(e events.Event) {
+				sr.UpdateBare()
+			})
 		})
-	})
+	}
 	tree.Add(p, func(w *core.FuncButton) {
 		w.SetFunc(sr.Queue).SetIcon(icons.List)
 	})
@@ -308,4 +310,16 @@ func (sr *Simmer) MakeToolbar(p *tree.Plan) {
 			core.TheApp.OpenURL("https://github.com/cogentcore/lab/blob/main/examples/simmer/README.md")
 		})
 	})
+}
+
+// runArgs returns the args of the sim for the run given by the shell
+// variable run, with a space before them, when the job has more than one
+// run ([JobParams.NRuns]), each run as a separate process: the starting
+// run (Run.Run) is that one, and the number of runs (Run.Runs) is 1. With
+// one run, there are none, so the sim does the runs of its config.
+func (sr *Simmer) runArgs(run string) string {
+	if sr.Project.Job.NRuns <= 1 {
+		return ""
+	}
+	return " -run.run " + run + " -run.runs 1"
 }

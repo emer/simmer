@@ -106,8 +106,8 @@ import (
 )
 
 func main() {
-	run := flag.Int("run", 0, "")
-	flag.Int("runs", 1, "")
+	run := flag.Int("run.run", 0, "")
+	flag.Int("run.runs", 1, "")
 	flag.Bool("nogui", false, "")
 	flag.String("cfg", "", "")
 	flag.Parse()
@@ -173,6 +173,8 @@ func main() {
 		time.Sleep(15 * time.Second)
 	}
 	assert.Equal(t, "Failed:1", stat)
+	// the output of the runs is fetched when the job fails
+	assert.Contains(t, goalib.ReadFile(filepath.Join(jpath, "job.1.out")), "failing")
 	assert.NotEmpty(t, goalib.ReadFile("job.start"))
 	assert.NotEmpty(t, goalib.ReadFile("job.end"))
 	out, err := sr.kubeExec("cd " + shq(r) + " && cat job.build job.0.out job.1.out")

@@ -257,9 +257,15 @@ func (sr *Simmer) saveColumnWidths(project *map[string]float32, widths map[strin
 	sr.SaveProject()
 }
 
-// EditProject edits the settings of the project, saving them.
+// EditProject edits the settings of the project, saving them, and
+// updating the toolbar, whose buttons depend on the server type.
 func (sr *Simmer) EditProject() { //types:add
-	lab.PromptStruct(sr, &sr.Project, "Project settings", sr.SaveProject)
+	lab.PromptStruct(sr, &sr.Project, "Project settings", func() {
+		sr.SaveProject()
+		if sr.Toolbar != nil {
+			sr.Toolbar.Update()
+		}
+	})
 }
 
 // NewProject makes a new simulation project for the simulation in the

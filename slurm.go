@@ -74,7 +74,7 @@ func (sr *Simmer) WriteSBatchArray(w io.Writer, jid, setup_id, args string) {
 	fmt.Fprintf(w, "echo $SLURM_ARRAY_JOB_ID\n")
 	fmt.Fprintf(w, "\n\n")
 	// note: could use srun to run job; -runs = 1 is number to run from run start
-	fmt.Fprintf(w, "./%s -nogui -cfg config_job.toml -run $SLURM_ARRAY_TASK_ID -runs 1 %s\n", sr.Project.Name, args)
+	fmt.Fprintf(w, "./%s -nogui -cfg config_job.toml%s %s\n", sr.Project.Name, sr.runArgs("$SLURM_ARRAY_TASK_ID"), args)
 }
 
 func (sr *Simmer) WriteSBatchCleanup(w io.Writer, jid, array_id string) {

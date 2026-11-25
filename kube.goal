@@ -343,7 +343,7 @@ func (sr *Simmer) WriteKubeScript(w io.Writer, jid, args string) {
 		fmt.Fprintf(w, "(\n%s\n) > job.$RUN.out 2>&1\n", js)
 	} else {
 		fmt.Fprintf(w, "TIMEOUT=; command -v timeout > /dev/null && TIMEOUT=\"timeout %dh\" # Job.Hours\n", hours)
-		fmt.Fprintf(w, "$TIMEOUT \"%s\" -nogui -cfg config_job.toml -run $RUN -runs 1 %s > job.$RUN.out 2>&1\n", exe, args)
+		fmt.Fprintf(w, "$TIMEOUT \"%s\" -nogui -cfg config_job.toml%s %s > job.$RUN.out 2>&1\n", exe, sr.runArgs("$RUN"), args)
 	}
 	fmt.Fprintf(w, "finish $?\n")
 }
@@ -494,11 +494,14 @@ func (sr *Simmer) JobStatusKube(jid string) string {
 
 // kubeRunsStatus updates the status of the given job, in the current
 // (local job) directory, returning it: Pending, Running:n, Failed:n
-// (with n runs that failed, once all are done), or Done. The status is
-// from the job.<run>.start and job.<run>.exit files of the runs in its
-// results directory, whose job.start and job.end are copied.
+// (with n runs that failed, once all are done, or Failed for one run),
+// or Done. The status is from the job.<run>.start and job.<run>.exit
+// files of the runs in its results directory, whose job.start and job.end
+// are copied. When the job has failed, its files are fetched, once, with
+// the output of the runs, to see what went wrong.
 func (sr *Simmer) kubeRunsStatus(jid string) string {
 	sstat := goalib.ReadFile("job.status")
+	prev := sstat
 	files, err := sr.kubeJobFiles(jid)
 	if err != nil {
 		core.ErrorSnackbar(sr, err)
@@ -530,6 +533,8 @@ func (sr *Simmer) kubeRunsStatus(jid string) string {
 		}
 	}
 	switch {
+	case nexit >= nruns && nfail > 0 && nruns == 1:
+		sstat = "Failed"
 	case nexit >= nruns && nfail > 0:
 		sstat = fmt.Sprintf("Failed:%d", nfail)
 	case nexit >= nruns:
@@ -544,6 +549,9 @@ func (sr *Simmer) kubeRunsStatus(jid string) string {
 		if out, err := sr.kubeExec(rdir + "cat " + f); err == nil {
 			goalib.WriteFile(f, strings.TrimSpace(out))
 		}
+	}
+	if strings.HasPrefix(sstat, "Failed") && !strings.HasPrefix(prev, "Failed") {
+		sr.FetchJobKube(jid, true)
 	}
 	return sstat
 }

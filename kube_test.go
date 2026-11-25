@@ -143,8 +143,8 @@ import (
 )
 
 func main() {
-	run := flag.Int("run", 0, "")
-	flag.Int("runs", 1, "")
+	run := flag.Int("run.run", 0, "")
+	flag.Int("run.runs", 1, "")
 	flag.Int("epochs", 1, "")
 	flag.Bool("nogui", false, "")
 	flag.String("cfg", "", "")
@@ -209,4 +209,18 @@ func TestKubeScriptBuildFail(t *testing.T) {
 		assert.Contains(t, read("job."+run+".out"), "undefined: undefinedThing")
 	}
 	assert.NotEmpty(t, read("job.end"))
+}
+
+// TestRunArgs tests that the run args are passed only for more than one run.
+func TestRunArgs(t *testing.T) {
+	sr := kubeTestSimmer()
+	assert.Equal(t, " -run.run $RUN -run.runs 1", sr.runArgs("$RUN"))
+	var b bytes.Buffer
+	sr.WriteKubeScript(&b, "ore00012", "-epochs 2")
+	assert.Contains(t, b.String(), "-cfg config_job.toml -run.run $RUN -run.runs 1 -epochs 2 > job.$RUN.out")
+	sr.Project.Job.NRuns = 1
+	assert.Equal(t, "", sr.runArgs("$RUN"))
+	b.Reset()
+	sr.WriteKubeScript(&b, "ore00012", "-epochs 2")
+	assert.Contains(t, b.String(), "-cfg config_job.toml -epochs 2 > job.$RUN.out")
 }
