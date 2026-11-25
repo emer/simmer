@@ -152,6 +152,25 @@ func (sr *Simmer) Queue() { //types:add
 	}
 }
 
+// statusCount returns the given status of a job with the given number n
+// of its runs in it, as status:n, if the job has more than one run
+// (nruns), or just the status.
+func statusCount(status string, n, nruns int) string {
+	if nruns <= 1 {
+		return status
+	}
+	return fmt.Sprintf("%s:%d", status, n)
+}
+
+// jobNRuns returns the number of runs of the given job, from its job.nruns
+// file, or [JobParams.NRuns] of the project if it has none.
+func (sr *Simmer) jobNRuns(jid string) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(goalib.ReadFile(filepath.Join(sr.JobPath(jid), "job.nruns")))); err == nil {
+		return n
+	}
+	return sr.Project.Job.NRuns
+}
+
 // JobStatus gets job status from server for given job id.
 // jobs that are already Finalized are skipped, unless force is true.
 func (sr *Simmer) JobStatus(jid string, force bool) {
@@ -186,11 +205,9 @@ func (sr *Simmer) JobStatus(jid string, force bool) {
 				@1 echo "Invalid job id" > job.squeue
 				sstat = "Done"
 			case strings.Contains(stat, "RUNNING"):
-				nrep := strings.Count(stat, "RUNNING")
-				sstat = fmt.Sprintf("Running:%d", nrep)
+				sstat = statusCount("Running", strings.Count(stat, "RUNNING"), sr.jobNRuns(jid))
 			case strings.Contains(stat, "PENDING"):
-				nrep := strings.Count(stat, "PENDING")
-				sstat = fmt.Sprintf("Pending:%d", nrep)
+				sstat = statusCount("Pending", strings.Count(stat, "PENDING"), sr.jobNRuns(jid))
 			case strings.Contains(stat, "STATE"): // still visible in queue but done
 				sstat = "Done"
 			}

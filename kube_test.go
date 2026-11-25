@@ -72,6 +72,8 @@ func TestKubeJobYAML(t *testing.T) {
 		"          requests: {cpu: \"4\", memory: 8Gi, nvidia.com/gpu: 1}\n",
 		"          limits: {memory: 8Gi, nvidia.com/gpu: 1}\n",
 		"          claimName: obelisk-shared\n",
+		"      " + kubePodSecurity + "\n", "        " + kubeContainerSecurity + "\n",
+		"        - {name: HOME, value: /tmp}",
 	} {
 		assert.Contains(t, y, s)
 	}
@@ -93,6 +95,8 @@ func TestKubeHelperYAML(t *testing.T) {
 	assert.Contains(t, y, "  nodeSelector:\n    astera.org/ns-obelisk: \"true\"\n    astera.org/pool: \"vp\"\n")
 	assert.Contains(t, y, "  - {key: astera.org/namespace, operator: Exists, effect: NoSchedule}\n")
 	assert.Contains(t, y, "      claimName: obelisk-shared\n")
+	assert.Contains(t, y, "  "+kubePodSecurity+"\n")
+	assert.Contains(t, y, "    "+kubeContainerSecurity+"\n")
 }
 
 // kubeScriptFile writes the worker script of the given job for the given
@@ -223,4 +227,11 @@ func TestRunArgs(t *testing.T) {
 	b.Reset()
 	sr.WriteKubeScript(&b, "ore00012", "-epochs 2")
 	assert.Contains(t, b.String(), "-cfg config_job.toml -epochs 2 > job.$RUN.out")
+}
+
+func TestStatusCount(t *testing.T) {
+	assert.Equal(t, "Running", statusCount("Running", 1, 1))
+	assert.Equal(t, "Failed", statusCount("Failed", 1, 0))
+	assert.Equal(t, "Running:2", statusCount("Running", 2, 3))
+	assert.Equal(t, "Failed:1", statusCount("Failed", 1, 2))
 }

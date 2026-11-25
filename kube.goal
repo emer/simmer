@@ -181,6 +181,14 @@ func goalError() error {
 	return errors.Join(goalrun.Errors...)
 }
 
+// kubePodSecurity is the securityContext of the pods: they run as nobody,
+// not root, as the policies of clusters may require, which also owns the
+// files on the shared (NFS) volumes that squash the users to it.
+const kubePodSecurity = "securityContext: {runAsNonRoot: true, runAsUser: 65534, runAsGroup: 65534}"
+
+// kubeContainerSecurity is the securityContext of the containers of the pods.
+const kubeContainerSecurity = "securityContext: {allowPrivilegeEscalation: false}"
+
 // WriteKubeHelper writes the manifest of the helper pod, which only
 // mounts the shared volume, for kubectl exec to upload the job files,
 // read the status files and fetch the results. It is scheduled as the
@@ -195,8 +203,10 @@ func (sr *Simmer) WriteKubeHelper(w io.Writer) {
 	fmt.Fprintf(w, "    app.kubernetes.io/managed-by: simmer\n")
 	fmt.Fprintf(w, "    simmer/user: %s\n", kubeName(sr.Project.User))
 	fmt.Fprintf(w, "spec:\n  restartPolicy: Always\n  terminationGracePeriodSeconds: 1\n")
+	fmt.Fprintf(w, "  %s\n", kubePodSecurity)
 	sr.writeKubeScheduling(w, "  ")
 	fmt.Fprintf(w, "  containers:\n  - name: data\n    image: alpine:3.21\n    command: [sleep, infinity]\n")
+	fmt.Fprintf(w, "    %s\n", kubeContainerSecurity)
 	fmt.Fprintf(w, "    resources:\n      requests: {cpu: 10m, memory: 32Mi}\n      limits: {cpu: \"1\", memory: 512Mi}\n")
 	fmt.Fprintf(w, "    volumeMounts:\n    - name: shared\n      mountPath: %s\n", sr.kubeMount())
 	fmt.Fprintf(w, "  volumes:\n  - name: shared\n    persistentVolumeClaim:\n      claimName: %s\n", sr.kubePVC())
@@ -373,6 +383,7 @@ func (sr *Simmer) WriteKubeJob(w io.Writer, jid string) {
 		fmt.Fprintf(w, "        %s: %q\n", l[0], l[1])
 	}
 	fmt.Fprintf(w, "    spec:\n      restartPolicy: Never\n")
+	fmt.Fprintf(w, "      %s\n", kubePodSecurity)
 	if k.SchedulerName != "" {
 		fmt.Fprintf(w, "      schedulerName: %s\n", k.SchedulerName)
 	}
@@ -382,7 +393,9 @@ func (sr *Simmer) WriteKubeJob(w io.Writer, jid string) {
 	sr.writeKubeScheduling(w, "      ")
 	fmt.Fprintf(w, "      containers:\n      - name: sim\n        image: %s\n", k.Image)
 	fmt.Fprintf(w, "        command: [bash, %s]\n", path.Join(sr.kubeSourceDir(jid), "job.sbatch"))
+	fmt.Fprintf(w, "        %s\n", kubeContainerSecurity)
 	fmt.Fprintf(w, "        env:\n")
+	fmt.Fprintf(w, "        - {name: HOME, value: /tmp} # nobody has no home\n")
 	fmt.Fprintf(w, "        - {name: NVIDIA_DRIVER_CAPABILITIES, value: all} # graphics, for Vulkan\n")
 	fmt.Fprintf(w, "        - {name: SIMMER_JOB, value: %s}\n", jid)
 	fmt.Fprintf(w, "        resources:\n")
@@ -494,21 +507,19 @@ func (sr *Simmer) JobStatusKube(jid string) string {
 
 // kubeRunsStatus updates the status of the given job, in the current
 // (local job) directory, returning it: Pending, Running:n, Failed:n
-// (with n runs that failed, once all are done, or Failed for one run),
-// or Done. The status is from the job.<run>.start and job.<run>.exit
+// (with n runs that failed, once all are done), or Done, without the
+// :n for one run (see [statusCount]). The status is from the job.<run>.start and job.<run>.exit
 // files of the runs in its results directory, whose job.start and job.end
-// are copied. When the job has failed, its files are fetched, once, with
-// the output of the runs, to see what went wrong.
+// are copied, with the output of the build and the runs (job.build and
+// job.<run>.out), as for the other servers.
 func (sr *Simmer) kubeRunsStatus(jid string) string {
 	sstat := goalib.ReadFile("job.status")
-	prev := sstat
 	files, err := sr.kubeJobFiles(jid)
 	if err != nil {
 		core.ErrorSnackbar(sr, err)
 		return sstat
 	}
-	nruns, _ := strconv.Atoi(strings.TrimSpace(goalib.ReadFile("job.nruns")))
-	nruns = max(nruns, 1)
+	nruns := max(sr.jobNRuns(jid), 1)
 	nstart, nexit := 0, 0
 	var exits, stamps []string
 	for _, f := range files {
@@ -533,14 +544,12 @@ func (sr *Simmer) kubeRunsStatus(jid string) string {
 		}
 	}
 	switch {
-	case nexit >= nruns && nfail > 0 && nruns == 1:
-		sstat = "Failed"
 	case nexit >= nruns && nfail > 0:
-		sstat = fmt.Sprintf("Failed:%d", nfail)
+		sstat = statusCount("Failed", nfail, nruns)
 	case nexit >= nruns:
 		sstat = "Done"
 	case nstart > 0:
-		sstat = fmt.Sprintf("Running:%d", nstart-nexit)
+		sstat = statusCount("Running", nstart-nexit, nruns)
 	default:
 		sstat = "Pending"
 	}
@@ -550,16 +559,19 @@ func (sr *Simmer) kubeRunsStatus(jid string) string {
 			goalib.WriteFile(f, strings.TrimSpace(out))
 		}
 	}
-	if strings.HasPrefix(sstat, "Failed") && !strings.HasPrefix(prev, "Failed") {
-		sr.FetchJobKube(jid, true)
+	if err := sr.kubeFetch(jid, kubeOutputFiles); err != nil {
+		core.ErrorSnackbar(sr, err)
 	}
 	return sstat
 }
 
+// kubeOutputFiles are the globs of the output files of the build and the
+// runs of a job.
+const kubeOutputFiles = "job.build job.*.out"
+
 // FetchJobKube downloads the results files ([Project.FetchFiles]) of the
 // given job from the shared volume, through the helper pod, with the
-// build and run output (job.build and job.<run>.out), which are small,
-// to see what went wrong.
+// output of the build and the runs (job.build and job.<run>.out).
 func (sr *Simmer) FetchJobKube(jid string, force bool) {
 	sr.kubeStart()
 	jpath := sr.JobPath(jid)
@@ -567,32 +579,39 @@ func (sr *Simmer) FetchJobKube(jid string, force bool) {
 	if !force && sstat == "Fetched" {
 		return
 	}
-	// the files that match the globs, as a tar.gz on stdout, to a file:
-	// output as a string would lose a final newline
-	globs := sr.Project.FetchFiles + " job.build job.*.out"
-	script := fmt.Sprintf("cd %s || exit 1\nset --\nfor f in %s; do [ -f \"$f\" ] && set -- \"$@\" \"$f\"; done\n[ $# -gt 0 ] && tar czf - \"$@\"\ntrue", shq(sr.KubeJobPath(jid)), globs)
-	tgz := filepath.Join(jpath, ".fetch.tgz")
-	err := sr.kubeExecTo(script, tgz)
-	defer os.Remove(tgz)
-	if err != nil {
+	if err := sr.kubeFetch(jid, sr.Project.FetchFiles+" "+kubeOutputFiles); err != nil {
 		core.ErrorSnackbar(sr, err)
 		return
-	}
-	if fi, err := os.Stat(tgz); err == nil && fi.Size() > 0 {
-		f, err := os.Open(tgz)
-		if err == nil {
-			err = baremetal.Untar(f, jpath, true)
-			f.Close()
-		}
-		if err != nil {
-			core.ErrorSnackbar(sr, err)
-			return
-		}
 	}
 	if sstat == "Finalized" {
 		goalib.WriteFile(filepath.Join(jpath, "job.status"), "Fetched")
 		goalib.ReplaceInFile(filepath.Join(jpath, "dbmeta.toml"), "\"Finalized\"", "\"Fetched\"")
 	}
+}
+
+// kubeFetch downloads the files of the given job that match the given
+// globs from its results directory on the shared volume, through the
+// helper pod, into its local job directory.
+func (sr *Simmer) kubeFetch(jid, globs string) error {
+	jpath := sr.JobPath(jid)
+	// the files that match the globs, as a tar.gz on stdout, to a file:
+	// output as a string would lose a final newline
+	script := fmt.Sprintf("cd %s || exit 1\nset --\nfor f in %s; do [ -f \"$f\" ] && set -- \"$@\" \"$f\"; done\n[ $# -gt 0 ] && tar czf - \"$@\"\ntrue", shq(sr.KubeJobPath(jid)), globs)
+	tgz := filepath.Join(jpath, ".fetch.tgz")
+	defer os.Remove(tgz)
+	if err := sr.kubeExecTo(script, tgz); err != nil {
+		return err
+	}
+	fi, err := os.Stat(tgz)
+	if err != nil || fi.Size() == 0 {
+		return nil
+	}
+	f, err := os.Open(tgz)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return baremetal.Untar(f, jpath, true)
 }
 
 // CancelJobsKube cancels the given jobs, by deleting their Jobs, with

@@ -219,12 +219,34 @@ func (sr *Simmer) DeleteJobsAstera(jobs []string) error {
 	return errors.Join(errs...)
 }
 
-// QueueAstera shows the Entries of the user and the pools of the namespace.
+// QueueAstera shows the Entries of the user and the pools of the namespace,
+// with the load of the queue: the Entries of all users in the namespace,
+// the resources allocated and requested in the KAI queue of the namespace
+// and that of its pool (all the queues in it), and the free resources of
+// the nodes of the namespace (with the workspace pods, which are not in
+// the queue).
 func (sr *Simmer) QueueAstera() {
 	sr.kubeStart()
 	ts := sr.Tabs.AsLab()
 	ns := sr.kubeNamespace()
+	pool := sr.Project.Server.K8s.Pool
+	if pool == "" {
+		pool = "vp"
+	}
+	queue := sr.Project.Server.K8s.Queue
+	if queue == "" {
+		queue = ns + "-" + pool
+	}
+	jp := `jsonpath={range .items[*]}{.metadata.name}{"\t"}{.status.allocated}{"\t"}{.status.requested}{"\n"}{end}`
 	list := goalrun.OutputErrOK("actl", "queue", "list", "-n", ns, "--no-color", "<", "/dev/null")
 	pools := goalrun.OutputErrOK("actl", "queue", "pools", "-n", ns, "--no-color", "<", "/dev/null")
-	ts.EditorString("Queue", list+"\n"+strings.Repeat("#", 60)+"\n"+pools+"\n"+time.Now().Format(sr.Project.TimeFormat))
+	all := goalrun.OutputErrOK("actl", "queue", "list", "-A", "-n", ns, "--no-color", "<", "/dev/null")
+	kai := goalrun.OutputErrOK("kubectl", "get", "queues.scheduling.run.ai", queue, pool, "-o", jp, "<", "/dev/null")
+	nodes := goalrun.OutputErrOK("actl", "pod", "profiles", "--by-node", "-n", ns, "--no-color", "<", "/dev/null")
+	sep := "\n" + strings.Repeat("#", 60) + "\n"
+	out := list + sep + pools + sep
+	out += "Entries of all users:\n" + all + sep
+	out += "KAI queues: allocated, requested:\n" + kai + sep
+	out += "Nodes:\n" + nodes + "\n" + time.Now().Format(sr.Project.TimeFormat)
+	ts.EditorString("Queue", out)
 }

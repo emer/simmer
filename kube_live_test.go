@@ -57,9 +57,11 @@ func TestKubeLive(t *testing.T) {
 
 	assert.Equal(t, "Pending", sr.JobStatusKube(jid))
 
-	_, err = sr.kubeExec("cd " + shq(r) + ` && date > job.start && date > job.0.start && date > job.1.start && echo 0 > job.0.exit && printf 'Epoch\n1\n' > sim_0_train_epoch.tsv && echo mylabel > job.label`)
+	_, err = sr.kubeExec("cd " + shq(r) + ` && date > job.start && date > job.0.start && date > job.1.start && echo 0 > job.0.exit && printf 'Epoch\n1\n' > sim_0_train_epoch.tsv && echo mylabel > job.label && echo run0 output > job.0.out`)
 	require.NoError(t, err)
 	assert.Equal(t, "Running:1", sr.JobStatusKube(jid))
+	// the status gets the output of the runs
+	assert.Equal(t, "run0 output", strings.TrimSpace(goalib.ReadFile("job.0.out")))
 
 	_, err = sr.kubeExec("cd " + shq(r) + " && echo 0 > job.1.exit && date > job.end && printf 'Epoch\n2\n' > sim_1_train_epoch.tsv")
 	require.NoError(t, err)
