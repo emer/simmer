@@ -164,10 +164,12 @@ func main() {
 		t.Run(st.String(), func(t *testing.T) {
 			sr := kubeTestSimmer()
 			sr.Project.Job.SubCmd = true
-			sfile, r, runVar := kubeScriptFile(t, sr, st, t.TempDir(), "ore00012", files)
+			tmp := t.TempDir()
+			sfile, r, runVar := kubeScriptFile(t, sr, st, tmp, "ore00012", files)
+			home := filepath.Join(tmp, "home") // the script links ~/.cache/go-xla
 			for _, run := range []string{"0", "1"} {
 				cmd := exec.Command("bash", sfile)
-				cmd.Env = append(os.Environ(), runVar+"="+run, "GOFLAGS=", "GOWORK=off")
+				cmd.Env = append(os.Environ(), runVar+"="+run, "GOFLAGS=", "GOWORK=off", "HOME="+home)
 				out, err := cmd.CombinedOutput()
 				require.NoError(t, err, string(out))
 			}
@@ -183,6 +185,10 @@ func main() {
 			assert.NotEmpty(t, read("job.start"))
 			assert.NotEmpty(t, read("job.end"))
 			assert.NotEmpty(t, read("job.0.start"))
+			xla, err := os.Readlink(filepath.Join(home, ".cache/go-xla"))
+			assert.NoError(t, err)
+			assert.Equal(t, filepath.Join(tmp, "mnt/simserver/.go/oreilly/go-xla-cache"), xla)
+			assert.DirExists(t, xla)
 		})
 	}
 }
@@ -194,13 +200,14 @@ func TestKubeScriptBuildFail(t *testing.T) {
 		t.Skip("no go")
 	}
 	sr := kubeTestSimmer()
-	sfile, r, runVar := kubeScriptFile(t, sr, Kube, t.TempDir(), "ore00013", map[string]string{
+	tmp := t.TempDir()
+	sfile, r, runVar := kubeScriptFile(t, sr, Kube, tmp, "ore00013", map[string]string{
 		"go.mod":  "module emer/mysim\n\ngo 1.22\n",
 		"main.go": "package main\n\nfunc main() { undefinedThing() }\n",
 	})
 	for _, run := range []string{"0", "1"} {
 		cmd := exec.Command("bash", sfile)
-		cmd.Env = append(os.Environ(), runVar+"="+run, "GOFLAGS=", "GOWORK=off")
+		cmd.Env = append(os.Environ(), runVar+"="+run, "GOFLAGS=", "GOWORK=off", "HOME="+filepath.Join(tmp, "home"))
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 	}

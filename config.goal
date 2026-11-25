@@ -230,6 +230,8 @@ type Project struct {
 
 	// Package is the parent package: e.g., github.com/emer/axon/v2
 	// This is used to update the go.mod, along with the Version.
+	// If empty, the module path in go.mod is used for rewriting the
+	// project's import paths in the job (and nothing is fetched).
 	Package string
 
 	// Server has server parameters.
@@ -260,7 +262,10 @@ type Project struct {
 	ExtraDirs []string
 
 	// CodeDirs has subdirs with code to upload with job submit;
-	// go.mod auto-updated to use.
+	// go.mod auto-updated to use. A dir outside the project dir in the
+	// same module, e.g., ../conflict/cfenv for a package shared with a
+	// sibling sim, goes inside the job without its leading ../ elements
+	// (at conflict/cfenv), and its imports are rewritten to use that copy.
 	CodeDirs []string
 
 	// ExtraGoGet is an extra package to do "go get" with, for launching the job.

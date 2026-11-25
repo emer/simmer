@@ -58,9 +58,8 @@ func (sr *Simmer) FindGoMod(dir string) string {
 // CopyFilesToJob copies files with given extensions (none for all),
 // from localSrc to localJob and remote hostJob (@1).
 // Ensures directories are made in the job locations.
-// If origProjPath and projPath are non-empty, and file is .go file, then the
-// origProjPath -> projPath replacement.
-func (sr *Simmer) CopyFilesToJob(localSrc, localJob, hostJob, origProjPath, projPath string, exts ...string) {
+// The import path rewrites are applied to the .go files.
+func (sr *Simmer) CopyFilesToJob(localSrc, localJob, hostJob string, rws []importRewrite, exts ...string) {
 	clearErrors()
 	errors.Log(sr.connectServer())
 	defer sr.restoreServerDir()()
@@ -78,8 +77,8 @@ func (sr *Simmer) CopyFilesToJob(localSrc, localJob, hostJob, origProjPath, proj
 	for _, f := range efls {
 		sfn := filepath.Join(localSrc, f)
 		goalrun.Run("/bin/cp", sfn, f)
-		if projPath != "" && strings.HasSuffix(f, ".go") {
-			goalib.ReplaceInFile(f, origProjPath, projPath)
+		if len(rws) > 0 && strings.HasSuffix(f, ".go") {
+			errors.Log(rewriteImportsInFile(f, rws))
 		}
 		if sr.Project.Server.Server == Slurm {
 			goalrun.Run("scp", f, "@1:"+f)
@@ -109,8 +108,12 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 	gomodDir := sr.FindGoMod(sr.StartDir)
 	subDir := strings.TrimPrefix(sr.StartDir, gomodDir)
 	projPath := path.Join("emer", subDir)
-	origProjPath := path.Join(sr.Project.Package, subDir)
-	// fmt.Println("gmd:", gomodDir, "sd:", subDir, "pp:", projPath, "opp:", origProjPath)
+	origBase := sr.Project.Package
+	if origBase == "" {
+		origBase = modulePath(gomodDir)
+	}
+	rws := importRewrites(origBase, gomodDir, sr.StartDir, projPath, sr.Project.CodeDirs)
+	// fmt.Println("gmd:", gomodDir, "sd:", subDir, "pp:", projPath, "rws:", rws)
 
 	// fmt.Println(jpath)
 	os.MkdirAll(jpath, 0750)
@@ -131,9 +134,9 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 	for _, ed := range cdirs {
 		goalrun.Run("@0")
 		loce := filepath.Join(sr.StartDir, ed)
-		jpathe := filepath.Join(jpath, ed)
-		spathe := filepath.Join(spath, ed)
-		sr.CopyFilesToJob(loce, jpathe, spathe, origProjPath, projPath, ".go", ".json", ".tsv")
+		jpathe := filepath.Join(jpath, jobCodeDir(ed)) // ../ dirs go inside the job
+		spathe := filepath.Join(spath, jobCodeDir(ed))
+		sr.CopyFilesToJob(loce, jpathe, spathe, rws, ".go", ".json", ".tsv")
 	}
 	// copy local files:
 	if isSlurm {
@@ -148,7 +151,7 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 	for _, f := range fls {
 		sfn := filepath.Join(sr.StartDir, f)
 		goalrun.Run("/bin/cp", sfn, f)
-		goalib.ReplaceInFile(f, origProjPath, projPath)
+		errors.Log(rewriteImportsInFile(f, rws))
 		if isSlurm {
 			goalrun.Run("scp", f, "@1:"+f)
 		}
@@ -164,7 +167,7 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 		jpathe := filepath.Join(jpath, ed)
 		spathe := filepath.Join(spath, ed)
 		loce := filepath.Join(sr.StartDir, ed)
-		sr.CopyFilesToJob(loce, jpathe, spathe, "", "")
+		sr.CopyFilesToJob(loce, jpathe, spathe, nil)
 	}
 	if isSlurm {
 		goalrun.Run("@1")
@@ -295,10 +298,11 @@ func (sr *Simmer) NewSearch(jp SubmitParams) {
 }
 
 // parseSearchN parses the output of a sim run with -search-n: the first
-// line that is an integer is the number of search jobs, and the lines
-// after it, if any, are the labels of the jobs (as the jobs save them
-// in job.label). Other output (e.g., from configuring the sim) before
-// the number is skipped.
+// line that is an integer is the number of search jobs, and the next
+// that many non-empty lines, if there are that many, are the labels of
+// the jobs (as the jobs save them in job.label). Other output before
+// the number (e.g., from configuring the sim) and after the labels
+// (e.g., "<sim> func1 succeeded" from cli.Run) is skipped.
 func parseSearchN(out string) (int, []string, error) {
 	sl := goalib.SplitLines(out)
 	for i, ln := range sl {
@@ -315,8 +319,10 @@ func parseSearchN(out string) (int, []string, error) {
 				labels = append(labels, l)
 			}
 		}
-		if len(labels) != ns {
+		if len(labels) < ns {
 			labels = nil
+		} else {
+			labels = labels[:ns]
 		}
 		return ns, labels, nil
 	}

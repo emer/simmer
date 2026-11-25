@@ -329,8 +329,15 @@ func (sr *Simmer) Status() { //types:add
 	sr.Jobs()
 	dpath := filepath.Join(sr.DataRoot, "jobs")
 	ds := fsx.Dirs(dpath)
-	for _, jid := range ds {
-		sr.JobStatus(jid, false) // true = update all -- for format and status edits
+	switch sr.Project.Server.Server {
+	case Kube, Astera: // in batches: each kubectl or actl call is slow
+		if err := sr.kubeStatusJobs(ds); err != nil {
+			core.ErrorSnackbar(sr, err)
+		}
+	default:
+		for _, jid := range ds {
+			sr.JobStatus(jid, false) // true = update all -- for format and status edits
+		}
 	}
 	core.MessageSnackbar(sr, "Jobs Status completed")
 	sr.UpdateSims()
@@ -363,8 +370,15 @@ func (sr *Simmer) Fetch() { //types:add
 		dpath := filepath.Join(sr.DataRoot, "jobs")
 		jobs = fsx.Dirs(dpath)
 	}
-	for _, jid := range jobs {
-		sr.FetchJob(jid, false)
+	switch sr.Project.Server.Server {
+	case Kube, Astera: // in one batch: each kubectl call is slow
+		if err := sr.kubeFetchJobs(jobs, false); err != nil {
+			core.ErrorSnackbar(sr, err)
+		}
+	default:
+		for _, jid := range jobs {
+			sr.FetchJob(jid, false)
+		}
 	}
 	core.MessageSnackbar(sr, "Fetch Jobs completed")
 	sr.UpdateSims()

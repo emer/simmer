@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cogentcore.org/core/base/errors"
@@ -220,12 +221,16 @@ func (sr *Simmer) kubeHelper() (string, error) {
 	sr.kubeEnv()
 	ns := sr.kubeNamespace()
 	pod := sr.kubeHelperName()
+	if helperReady(ns + "/" + pod) {
+		return pod, nil
+	}
 	jp := "jsonpath={.status.phase}"
 	phase := goalrun.Output("kubectl", "-n", ns, "get", "pod", pod, "--ignore-not-found", "-o", jp)
 	if err := goalError(); err != nil {
 		return pod, err
 	}
 	if phase == "Running" {
+		setHelperReady(ns+"/"+pod, true)
 		return pod, nil
 	}
 	if phase == "" {
@@ -238,7 +243,46 @@ func (sr *Simmer) kubeHelper() (string, error) {
 		os.Remove(mf)
 	}
 	goalrun.Run("kubectl", "-n", ns, "wait", "--for=condition=Ready", "pod/"+pod, "--timeout=180s")
-	return pod, goalError()
+	err := goalError()
+	setHelperReady(ns+"/"+pod, err == nil)
+	return pod, err
+}
+
+// helperChecked has the time each helper pod (namespace/name) was last
+// found to be running, so that it is checked (one kubectl call) at most
+// every [helperCheckInterval], not before every exec.
+var (
+	helperMu      sync.Mutex
+	helperChecked = map[string]time.Time{}
+)
+
+const helperCheckInterval = 2 * time.Minute
+
+// helperError returns err, after which the helper pod is checked again
+// before the next exec, if err is not nil.
+func (sr *Simmer) helperError(err error) error {
+	if err != nil {
+		setHelperReady(sr.kubeNamespace()+"/"+sr.kubeHelperName(), false)
+	}
+	return err
+}
+
+func helperReady(key string) bool {
+	helperMu.Lock()
+	defer helperMu.Unlock()
+	return time.Since(helperChecked[key]) < helperCheckInterval
+}
+
+// setHelperReady records that the helper pod is running (ok), or that it
+// must be checked again before the next exec (!ok, after an error).
+func setHelperReady(key string, ok bool) {
+	helperMu.Lock()
+	defer helperMu.Unlock()
+	if ok {
+		helperChecked[key] = time.Now()
+	} else {
+		delete(helperChecked, key)
+	}
 }
 
 // kubeExec runs the given sh script in the helper pod, returning its output.
@@ -249,7 +293,7 @@ func (sr *Simmer) kubeExec(script string) (string, error) {
 	}
 	ns := sr.kubeNamespace()
 	out := goalrun.Output("kubectl", "-n", ns, "exec", pod, "--", "sh", "-c", script, "<", "/dev/null")
-	return out, goalError()
+	return out, sr.helperError(goalError())
 }
 
 // kubeExecTo runs the given sh script in the helper pod, with its output
@@ -261,7 +305,7 @@ func (sr *Simmer) kubeExecTo(script, file string) error {
 	}
 	ns := sr.kubeNamespace()
 	goalrun.Run("kubectl", "-n", ns, "exec", pod, "--", "sh", "-c", script, "<", "/dev/null", ">", file)
-	return goalError()
+	return sr.helperError(goalError())
 }
 
 // kubeExecFrom runs the given sh script in the helper pod, with its input
@@ -273,7 +317,7 @@ func (sr *Simmer) kubeExecFrom(script, file string) error {
 	}
 	ns := sr.kubeNamespace()
 	goalrun.Run("kubectl", "-n", ns, "exec", "-i", pod, "--", "sh", "-c", script, "<", file)
-	return goalError()
+	return sr.helperError(goalError())
 }
 
 // kubeShell is the kubesh command of the terminal: it runs an interactive
@@ -340,6 +384,14 @@ func (sr *Simmer) WriteKubeScript(w io.Writer, jid, args string) {
 	fmt.Fprintf(w, "NRUNS=%d\n", nruns)
 	fmt.Fprintf(w, "export GOCACHE=%s GOMODCACHE=%s\n", shq(gohome+"/cache"), shq(gohome+"/mod"))
 	fmt.Fprintf(w, "export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp} # for glfw, which the sims link\n")
+	// gomlx XLA downloads its PJRT plugins and the CUDA libraries (~2.5 GB)
+	// into ~/.cache/go-xla, and installs them in ~/.local/lib/go-xla, if they
+	// are not there. A link to the shared volume for the download cache makes
+	// the downloads once for all jobs (the files are hash checked); the install
+	// stays local, because the CUDA install removes a directory with its open
+	// lock file in it, which fails on NFS.
+	fmt.Fprintf(w, "X=%s # gomlx XLA download cache, shared by all jobs\n", shq(gohome+"/go-xla-cache"))
+	fmt.Fprintf(w, "mkdir -p \"$X\" \"$HOME/.cache\" && { [ -e \"$HOME/.cache/go-xla\" ] || ln -s \"$X\" \"$HOME/.cache/go-xla\"; }\n")
 	fmt.Fprintf(w, "mkdir -p \"$R\" \"$GOCACHE\" \"$GOMODCACHE\"\n")
 	fmt.Fprintf(w, "cd \"$R\" || exit 1\n")
 	fmt.Fprintf(w, "finish() {\n")
