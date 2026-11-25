@@ -40,48 +40,101 @@ func TestKubeNames(t *testing.T) {
 	sr := kubeTestSimmer()
 	assert.Equal(t, "obelisk-shared", sr.kubePVC())
 	assert.Equal(t, "/mnt/obelisk-shared/simserver/mysim/Oreilly/jobs/ore00012", sr.KubeJobPath("ore00012"))
-	assert.Equal(t, "mysim-ore00012", sr.kubeEntryPrefix("ore00012"))
+	assert.Equal(t, "mysim-ore00012", sr.kubeJobName("ore00012"))
 	assert.Equal(t, "simmer-oreilly-obelisk-shared", sr.kubeHelperName())
 	assert.Equal(t, "my-sim-x", kubeName("_My_Sim.x_"))
-
-	out := "==> uploading source\nEntry mysim-ore00012-k7x2q submitted.\n"
-	assert.Equal(t, "mysim-ore00012-k7x2q", kubeEntryName(out, "mysim-ore00012"))
-	assert.Equal(t, "", kubeEntryName("nothing here", "mysim-ore00012"))
+	assert.Equal(t, "/mnt/obelisk-shared/simserver/mysim/Oreilly/jobs/ore00012/.src", sr.kubeSourceDir("ore00012"))
+	sr.Project.Server.Server = Astera
+	assert.Equal(t, "/home/dev/workspace", sr.kubeSourceDir("ore00012"))
 }
 
-func TestKubeQueueYAML(t *testing.T) {
+func TestKubeJobYAML(t *testing.T) {
 	sr := kubeTestSimmer()
+	k := &sr.Project.Server.K8s
+	k.ServiceAccount = "simmer"
+	k.SchedulerName = "kai-scheduler"
+	k.NodeSelector = map[string]string{"pool": "vp", "gpu": "true"}
+	k.Tolerations = []string{"nvidia.com/gpu", "dedicated:NoExecute"}
+	k.Labels = map[string]string{"kai.scheduler/queue": "obelisk-vp"}
 	var b bytes.Buffer
-	sr.WriteKubeQueue(&b, "ore00012")
+	sr.WriteKubeJob(&b, "ore00012")
 	y := b.String()
 	for _, s := range []string{
-		"name: mysim-ore00012\n",
-		"image: harbor.astera.sh/obelisk/simmer-go:1\n",
-		"replicas: 2\n", "gpu: 1\n", "cpu: \"4\"\n", "memory: 8Gi\n",
-		"pvc: obelisk-shared\n", "mountPath: /mnt/obelisk-shared\n",
-		"command: [bash, job.sbatch]\n",
+		"kind: Job\n", "  name: mysim-ore00012\n  namespace: obelisk\n",
+		"  completionMode: Indexed\n  completions: 2\n  parallelism: 2\n",
+		"    simmer/job: \"ore00012\"\n", "        kai.scheduler/queue: \"obelisk-vp\"\n",
+		"      schedulerName: kai-scheduler\n", "      serviceAccountName: simmer\n",
+		"      nodeSelector:\n        gpu: \"true\"\n        pool: \"vp\"\n",
+		"      - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}\n",
+		"      - {key: dedicated, operator: Exists, effect: NoExecute}\n",
+		"        image: harbor.astera.sh/obelisk/simmer-go:1\n",
+		"        command: [bash, /mnt/obelisk-shared/simserver/mysim/Oreilly/jobs/ore00012/.src/job.sbatch]\n",
+		"          requests: {cpu: \"4\", memory: 8Gi, nvidia.com/gpu: 1}\n",
+		"          limits: {memory: 8Gi, nvidia.com/gpu: 1}\n",
+		"          claimName: obelisk-shared\n",
 	} {
 		assert.Contains(t, y, s)
 	}
-	assert.NotContains(t, y, "pool:")
+	sr.Project.Job.GPUs = 0
+	b.Reset()
+	sr.WriteKubeJob(&b, "ore00012")
+	assert.NotContains(t, b.String(), "nvidia.com/gpu:")
+}
+
+func TestKubeHelperYAML(t *testing.T) {
+	sr := kubeTestSimmer()
+	var b bytes.Buffer
+	sr.WriteKubeHelper(&b)
+	assert.NotContains(t, b.String(), "nodeSelector")
+	sr.Project.Server.Server = Astera
+	b.Reset()
+	sr.WriteKubeHelper(&b)
+	y := b.String()
+	assert.Contains(t, y, "  nodeSelector:\n    astera.org/ns-obelisk: \"true\"\n    astera.org/pool: \"vp\"\n")
+	assert.Contains(t, y, "  - {key: astera.org/namespace, operator: Exists, effect: NoSchedule}\n")
+	assert.Contains(t, y, "      claimName: obelisk-shared\n")
+}
+
+// kubeScriptFile writes the worker script of the given job for the given
+// server type, with the paths of the pod replaced by those in the given
+// temporary directory: mnt for the shared volume, and ws for the workspace
+// of Astera, or the .src directory that simmer uploads for Kube, which the
+// files of the job are copied to. It returns the script file, the results
+// directory, and the environment variable of the run number.
+func kubeScriptFile(t *testing.T, sr *Simmer, st ServerTypes, tmp, jid string, files map[string]string) (sfile, r, runVar string) {
+	sr.Project.Server.Server = st
+	mnt := filepath.Join(tmp, "mnt")
+	r = filepath.Join(mnt, "simserver/mysim/Oreilly/jobs", jid)
+	ws := filepath.Join(tmp, "ws")
+	runVar = "ACTL_WORKER_RANK"
+	if st == Kube {
+		ws = filepath.Join(r, ".src")
+		runVar = "JOB_COMPLETION_INDEX"
+	}
+	for f, c := range files {
+		require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(ws, f)), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(ws, f), []byte(c), 0644))
+	}
+	var b bytes.Buffer
+	sr.WriteKubeScript(&b, jid, "-epochs 2")
+	script := strings.ReplaceAll(b.String(), "/mnt/obelisk-shared", mnt)
+	script = strings.ReplaceAll(script, "/home/dev/workspace", ws)
+	sfile = filepath.Join(tmp, "job.sbatch")
+	require.NoError(t, os.WriteFile(sfile, []byte(script), 0755))
+	return
 }
 
 // TestKubeScript runs the worker script of a job for both runs, with a
-// small sim, with the paths of the pod replaced by temporary ones, and
-// checks the results and the status files.
+// small sim, for Kube and Astera, with the paths of the pod replaced by
+// temporary ones, and checks the results and the status files.
 func TestKubeScript(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("no go")
 	}
-	sr := kubeTestSimmer()
-	sr.Project.Job.SubCmd = true
-	tmp := t.TempDir()
-	ws := filepath.Join(tmp, "ws")
-	mnt := filepath.Join(tmp, "mnt")
-	require.NoError(t, os.MkdirAll(filepath.Join(ws, "mysim"), 0755))
-	os.WriteFile(filepath.Join(ws, "go.mod"), []byte("module emer/mysim\n\ngo 1.22\n"), 0644)
-	os.WriteFile(filepath.Join(ws, "config_job.toml"), []byte("x = 1\n"), 0644)
-	os.WriteFile(filepath.Join(ws, "mysim", "main.go"), []byte(`package main
+	files := map[string]string{
+		"go.mod":          "module emer/mysim\n\ngo 1.22\n",
+		"config_job.toml": "x = 1\n",
+		"mysim/main.go": `package main
 
 import (
 	"flag"
@@ -102,34 +155,32 @@ func main() {
 	}
 	os.WriteFile(fmt.Sprintf("mysim_%d_train_epoch.tsv", *run), []byte("Epoch\n1\n"), 0644)
 }
-`), 0644)
-
-	var b bytes.Buffer
-	sr.WriteKubeScript(&b, "ore00012", "-epochs 2")
-	script := strings.ReplaceAll(b.String(), "/mnt/obelisk-shared", mnt)
-	script = strings.ReplaceAll(script, "/home/dev/workspace", ws)
-	sfile := filepath.Join(tmp, "job.sbatch")
-	require.NoError(t, os.WriteFile(sfile, []byte(script), 0755))
-
-	for _, run := range []string{"0", "1"} {
-		cmd := exec.Command("bash", sfile)
-		cmd.Env = append(os.Environ(), "ACTL_WORKER_RANK="+run, "GOFLAGS=", "GOWORK=off")
-		out, err := cmd.CombinedOutput()
-		require.NoError(t, err, string(out))
+`}
+	for _, st := range []ServerTypes{Kube, Astera} {
+		t.Run(st.String(), func(t *testing.T) {
+			sr := kubeTestSimmer()
+			sr.Project.Job.SubCmd = true
+			sfile, r, runVar := kubeScriptFile(t, sr, st, t.TempDir(), "ore00012", files)
+			for _, run := range []string{"0", "1"} {
+				cmd := exec.Command("bash", sfile)
+				cmd.Env = append(os.Environ(), runVar+"="+run, "GOFLAGS=", "GOWORK=off")
+				out, err := cmd.CombinedOutput()
+				require.NoError(t, err, string(out))
+			}
+			read := func(f string) string {
+				b, _ := os.ReadFile(filepath.Join(r, f))
+				return strings.TrimSpace(string(b))
+			}
+			assert.Equal(t, "0", read("job.0.exit"), read("job.build")+read("job.0.out"))
+			assert.Equal(t, "3", read("job.1.exit"))
+			assert.Equal(t, "failing", read("job.1.out"))
+			assert.Equal(t, "Epoch\n1", read("mysim_0_train_epoch.tsv"))
+			assert.Equal(t, "x = 1", read("config_job.toml")) // the job files are copied
+			assert.NotEmpty(t, read("job.start"))
+			assert.NotEmpty(t, read("job.end"))
+			assert.NotEmpty(t, read("job.0.start"))
+		})
 	}
-	r := filepath.Join(mnt, "simserver/mysim/Oreilly/jobs/ore00012")
-	read := func(f string) string {
-		b, _ := os.ReadFile(filepath.Join(r, f))
-		return strings.TrimSpace(string(b))
-	}
-	assert.Equal(t, "0", read("job.0.exit"), read("job.build")+read("job.0.out"))
-	assert.Equal(t, "3", read("job.1.exit"))
-	assert.Equal(t, "failing", read("job.1.out"))
-	assert.Equal(t, "Epoch\n1", read("mysim_0_train_epoch.tsv"))
-	assert.Equal(t, "x = 1", read("config_job.toml")) // the job files are copied
-	assert.NotEmpty(t, read("job.start"))
-	assert.NotEmpty(t, read("job.end"))
-	assert.NotEmpty(t, read("job.0.start"))
 }
 
 // TestKubeScriptBuildFail checks that when the build fails, every run
@@ -139,26 +190,16 @@ func TestKubeScriptBuildFail(t *testing.T) {
 		t.Skip("no go")
 	}
 	sr := kubeTestSimmer()
-	tmp := t.TempDir()
-	ws := filepath.Join(tmp, "ws")
-	mnt := filepath.Join(tmp, "mnt")
-	require.NoError(t, os.MkdirAll(ws, 0755))
-	os.WriteFile(filepath.Join(ws, "go.mod"), []byte("module emer/mysim\n\ngo 1.22\n"), 0644)
-	os.WriteFile(filepath.Join(ws, "main.go"), []byte("package main\n\nfunc main() { undefinedThing() }\n"), 0644)
-
-	var b bytes.Buffer
-	sr.WriteKubeScript(&b, "ore00013", "")
-	script := strings.ReplaceAll(b.String(), "/mnt/obelisk-shared", mnt)
-	script = strings.ReplaceAll(script, "/home/dev/workspace", ws)
-	sfile := filepath.Join(tmp, "job.sbatch")
-	require.NoError(t, os.WriteFile(sfile, []byte(script), 0755))
+	sfile, r, runVar := kubeScriptFile(t, sr, Kube, t.TempDir(), "ore00013", map[string]string{
+		"go.mod":  "module emer/mysim\n\ngo 1.22\n",
+		"main.go": "package main\n\nfunc main() { undefinedThing() }\n",
+	})
 	for _, run := range []string{"0", "1"} {
 		cmd := exec.Command("bash", sfile)
-		cmd.Env = append(os.Environ(), "ACTL_WORKER_RANK="+run, "GOFLAGS=", "GOWORK=off")
+		cmd.Env = append(os.Environ(), runVar+"="+run, "GOFLAGS=", "GOWORK=off")
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
 	}
-	r := filepath.Join(mnt, "simserver/mysim/Oreilly/jobs/ore00013")
 	read := func(f string) string {
 		b, _ := os.ReadFile(filepath.Join(r, f))
 		return strings.TrimSpace(string(b))

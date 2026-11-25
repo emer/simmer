@@ -6,16 +6,16 @@ import (
 	"cogentcore.org/core/enums"
 )
 
-var _ServerTypesValues = []ServerTypes{0, 1, 2}
+var _ServerTypesValues = []ServerTypes{0, 1, 2, 3}
 
 // ServerTypesN is the highest valid value for type ServerTypes, plus one.
-const ServerTypesN ServerTypes = 3
+const ServerTypesN ServerTypes = 4
 
-var _ServerTypesValueMap = map[string]ServerTypes{`BareMetal`: 0, `Slurm`: 1, `Kube`: 2}
+var _ServerTypesValueMap = map[string]ServerTypes{`BareMetal`: 0, `Slurm`: 1, `Kube`: 2, `Astera`: 3}
 
-var _ServerTypesDescMap = map[ServerTypes]string{0: `BareMetal uses the simmer/baremetal job manager which runs jobs through ssh with no job manager on the server.`, 1: `Slurm uses the slurm job manager.`, 2: `Kube runs the jobs on a Kubernetes cluster, as actl Queue Entries (see kube.go): one Entry per job, with one worker per run ([JobParams.NRuns]). The SSH server is not used.`}
+var _ServerTypesDescMap = map[ServerTypes]string{0: `BareMetal uses the simmer/baremetal job manager which runs jobs through ssh with no job manager on the server.`, 1: `Slurm uses the slurm job manager.`, 2: `Kube runs the jobs on a Kubernetes cluster with kubectl, as standard Indexed Jobs (see kube.go): one Job per simmer job, with one pod per run ([JobParams.NRuns]), on a shared volume ([KubeParams.SharedPVC]). The SSH server is not used.`, 3: `Astera runs the jobs on the Astera Kubernetes cluster, as actl Queue Entries (see astera.go and https://actl.astera.sh), with the Kube mechanisms for the shared volume, status and results.`}
 
-var _ServerTypesMap = map[ServerTypes]string{0: `BareMetal`, 1: `Slurm`, 2: `Kube`}
+var _ServerTypesMap = map[ServerTypes]string{0: `BareMetal`, 1: `Slurm`, 2: `Kube`, 3: `Astera`}
 
 // String returns the string representation of this ServerTypes value.
 func (i ServerTypes) String() string { return enums.String(i, _ServerTypesMap) }

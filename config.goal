@@ -21,10 +21,16 @@ const (
 	// Slurm uses the slurm job manager.
 	Slurm
 
-	// Kube runs the jobs on a Kubernetes cluster, as actl Queue Entries
-	// (see kube.go): one Entry per job, with one worker per run
-	// ([JobParams.NRuns]). The SSH server is not used.
+	// Kube runs the jobs on a Kubernetes cluster with kubectl, as
+	// standard Indexed Jobs (see kube.go): one Job per simmer job, with one
+	// pod per run ([JobParams.NRuns]), on a shared volume
+	// ([KubeParams.SharedPVC]). The SSH server is not used.
 	Kube
+
+	// Astera runs the jobs on the Astera Kubernetes cluster, as actl Queue
+	// Entries (see astera.go and https://actl.astera.sh), with the Kube
+	// mechanisms for the shared volume, status and results.
+	Astera
 )
 
 // ServerParams are parameters for the server.
@@ -42,19 +48,24 @@ type ServerParams struct {
 	Root string
 
 	// SSH is the user@host of the server, for the ssh connection to it,
-	// which is @1 in goal commands.
+	// which is @1 in goal commands. It is not used for Kube or Astera.
 	SSH string
 
-	// Kubernetes parameters, for Kube.
+	// Kubernetes parameters, for Kube and Astera.
 	K8s KubeParams `display:"inline"`
 }
 
 // KubeParams are the parameters for running jobs on a Kubernetes
-// cluster through actl Queue Entries (see [ServerParams.K8s]).
+// cluster, for the Kube and Astera servers (see [ServerParams.K8s]).
 type KubeParams struct {
 
 	// Namespace is the Kubernetes namespace of the jobs, e.g., obelisk.
 	Namespace string
+
+	// Kubeconfig is the kubeconfig file of the cluster, if not that of
+	// KUBECONFIG or ~/.kube/config (for Astera, ~/.kube/astera-sh-oidc.yaml
+	// of actl).
+	Kubeconfig string `width:"60"`
 
 	// Image is the container image that the jobs run in, which must have
 	// Go and Vulkan (see the docker directory), e.g.,
@@ -67,27 +78,60 @@ type KubeParams struct {
 	// (see docker/README.md).
 	ServiceAccount string
 
-	// Pool is the actl Queue compute pool, if not the default one
-	// (actl queue pools lists them).
-	Pool string
-
-	// Queue is the actl Queue (KAI) queue, if not the default one.
-	Queue string
-
 	// SharedPVC is the shared volume (RWX) that the results are written to,
 	// at /mnt/SharedPVC/[ServerParams.Root]/jobs/<job>.
 	// Defaults to Namespace-shared.
 	SharedPVC string
+
+	// Pool is the actl Queue compute pool, if not the default one
+	// (actl queue pools lists them), for Astera.
+	Pool string
+
+	// Queue is the actl Queue (KAI) queue, if not the default one,
+	// for Astera.
+	Queue string
+
+	// NodeSelector has the node labels that the pods of the jobs, and the
+	// helper pod that reads the shared volume, must have, for Kube.
+	NodeSelector map[string]string
+
+	// Tolerations are the taints of the nodes that the pods tolerate, as
+	// key or key:Effect (NoSchedule by default), for Kube.
+	Tolerations []string
+
+	// SchedulerName is the scheduler of the pods of the jobs, if not the
+	// default one, e.g., kai-scheduler, for Kube.
+	SchedulerName string
+
+	// Labels are extra labels of the jobs and their pods, as for the queue
+	// of a scheduler (e.g., kai.scheduler/queue), for Kube.
+	Labels map[string]string
+
+	// server is the server type, for the fields to display.
+	server ServerTypes
+}
+
+func (kp *KubeParams) ShouldDisplay(field string) bool {
+	switch field {
+	case "Pool", "Queue":
+		return kp.server == Astera
+	case "NodeSelector", "Tolerations", "SchedulerName", "Labels":
+		return kp.server == Kube
+	default:
+		return true
+	}
 }
 
 func (sp *ServerParams) Defaults() {
 }
 
 func (sp *ServerParams) ShouldDisplay(field string) bool {
+	sp.K8s.server = sp.Server
 	switch field {
 	case "K8s":
-		return sp.Server == Kube
-	// todo: SSH not for Kube?
+		return sp.Server == Kube || sp.Server == Astera
+	case "SSH": // the Kube and Astera commands run locally
+		return sp.Server != Kube && sp.Server != Astera
 	default:
 		return true
 	}
@@ -291,6 +335,7 @@ func (cf *Project) Defaults() {
 func (cf *Project) Update() {
 	cf.UserShort = cf.User[:min(3, len(cf.User))]
 	cf.Server.Root = filepath.Join("simserver", cf.Name, cf.User)
+	cf.Server.K8s.server = cf.Server.Server
 }
 
 // Result has info for one loaded result, as a table.Table

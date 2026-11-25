@@ -216,6 +216,12 @@ func (sr *Simmer) NewJob(jp SubmitParams) {
 		goalrun.Run("@1", "cd")
 	case Kube:
 		sid := sr.SubmitKube(jid, args)
+		fmt.Println("server job (Job):", sid)
+		if sid != "" {
+			sr.AsyncMessageSnackbar("Job: " + jid + " Kubernetes Job: " + sid + " successfully submitted")
+		}
+	case Astera:
+		sid := sr.SubmitAstera(jid, args)
 		fmt.Println("server job (Entry):", sid)
 		if sid != "" {
 			sr.AsyncMessageSnackbar("Job: " + jid + " Entry: " + sid + " successfully submitted")

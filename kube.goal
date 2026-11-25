@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,22 +23,24 @@ import (
 	"github.com/emer/simmer/baremetal"
 )
 
-// kube supports running jobs on a Kubernetes cluster, through the actl
-// Queue (https://actl.astera.sh): each simmer job is a Queue Entry, with
-// one worker per run ([JobParams.NRuns]), like a slurm array job, each
-// running job.sbatch with its run number from ACTL_WORKER_RANK.
+// kube supports running jobs on a Kubernetes cluster, with kubectl: each
+// simmer job is a standard Indexed Job, with one pod per run
+// ([JobParams.NRuns]), like a slurm array job, each running job.sbatch
+// with its run number from JOB_COMPLETION_INDEX.
 //
-// The job directory is uploaded as the source of the Entry, and the
-// workers build the sim and run it in the results directory on the shared
+// The pods run the sim in the results directory of the job on a shared
 // volume ([KubeParams.SharedPVC]), so that the results are there while
-// the job runs, and are kept after the Entry is deleted. The local machine
-// cannot mount that volume, so simmer reads the status files and fetches
-// the results through a small helper pod that mounts it (see
-// [Simmer.kubeHelper]), with kubectl exec.
+// the job runs, and are kept after the Job is deleted. The local machine
+// cannot mount that volume, so simmer uploads the job files to it, reads
+// the status files, and fetches the results, through a small helper pod
+// that mounts it (see [Simmer.kubeHelper]), with kubectl exec.
 //
-// The actl and kubectl commands run as goal shell commands on the local
-// host (@0), so their output (to the terminal) shows what they did. Each
-// operation starts with [kubeStart], and gets the errors of its commands
+// The Astera server (astera.go) uses all of this but for the Job itself,
+// which is an actl Queue Entry, whose source is uploaded by actl.
+//
+// The kubectl commands run as goal shell commands on the local host (@0),
+// so their output (to the terminal) shows what they did. Each operation
+// starts with [Simmer.kubeStart], and gets the errors of its commands
 // with [goalError].
 
 // kubeNamespace returns the namespace of the jobs.
@@ -72,14 +75,15 @@ var kubeNameRE = regexp.MustCompile(`[^a-z0-9-]+`)
 func kubeName(s string) string {
 	s = kubeNameRE.ReplaceAllString(strings.ToLower(s), "-")
 	s = strings.Trim(s, "-")
-	if len(s) > 40 { // room for the suffixes that actl adds
+	if len(s) > 40 { // room for the suffixes that actl and Kubernetes add
 		s = strings.Trim(s[:40], "-")
 	}
 	return s
 }
 
-// kubeEntryPrefix returns the name prefix of the Queue Entry of the job.
-func (sr *Simmer) kubeEntryPrefix(jid string) string {
+// kubeJobName returns the name of the Kubernetes Job of the given job,
+// which is the prefix of the name of its actl Queue Entry for Astera.
+func (sr *Simmer) kubeJobName(jid string) string {
 	return kubeName(sr.Project.Name + "-" + jid)
 }
 
@@ -88,49 +92,100 @@ func (sr *Simmer) kubeHelperName() string {
 	return kubeName("simmer-" + sr.Project.User + "-" + sr.kubePVC())
 }
 
+// kubeLabels returns the labels of the Job of the given job and its pods,
+// with the [KubeParams.Labels], sorted by key.
+func (sr *Simmer) kubeLabels(jid string) [][2]string {
+	lb := map[string]string{
+		"app.kubernetes.io/managed-by": "simmer",
+		"simmer/user":                  kubeName(sr.Project.User),
+		"simmer/project":               kubeName(sr.Project.Name),
+		"simmer/job":                   kubeName(jid),
+	}
+	for k, v := range sr.Project.Server.K8s.Labels {
+		lb[k] = v
+	}
+	return sortedPairs(lb)
+}
+
+// sortedPairs returns the key, value pairs of the given map, sorted by key.
+func sortedPairs(m map[string]string) [][2]string {
+	var ps [][2]string
+	for k, v := range m {
+		ps = append(ps, [2]string{k, v})
+	}
+	slices.SortFunc(ps, func(a, b [2]string) int { return strings.Compare(a[0], b[0]) })
+	return ps
+}
+
+// kubeScheduling returns the node selector and tolerations of the pods,
+// which are those of the [KubeParams] for Kube, and of the pool of the
+// namespace for Astera (see [Simmer.asteraScheduling]).
+func (sr *Simmer) kubeScheduling() (map[string]string, []string) {
+	if sr.Project.Server.Server == Astera {
+		return sr.asteraScheduling()
+	}
+	k := &sr.Project.Server.K8s
+	return k.NodeSelector, k.Tolerations
+}
+
+// writeKubeScheduling writes the nodeSelector and tolerations of a pod
+// spec, with the given indent, from [Simmer.kubeScheduling].
+func (sr *Simmer) writeKubeScheduling(w io.Writer, ind string) {
+	sel, tols := sr.kubeScheduling()
+	if len(sel) > 0 {
+		fmt.Fprintf(w, "%snodeSelector:\n", ind)
+		for _, p := range sortedPairs(sel) {
+			fmt.Fprintf(w, "%s  %s: %q\n", ind, p[0], p[1])
+		}
+	}
+	if len(tols) > 0 {
+		fmt.Fprintf(w, "%stolerations:\n", ind)
+		for _, t := range tols {
+			key, effect, ok := strings.Cut(t, ":")
+			if !ok {
+				effect = "NoSchedule"
+			}
+			fmt.Fprintf(w, "%s- {key: %s, operator: Exists, effect: %s}\n", ind, key, effect)
+		}
+	}
+}
+
 // kubeStart starts a kube operation: it clears the errors of the goal
 // commands (see [clearErrors]), and makes the local host the default one
-// for them (see [kubeEnv]).
-func kubeStart() {
+// for them (see [Simmer.kubeEnv]).
+func (sr *Simmer) kubeStart() {
 	clearErrors()
-	kubeEnv()
+	sr.kubeEnv()
 }
 
 // kubeEnv makes the local host the default one for the goal commands, and
-// sets KUBECONFIG to the actl one (~/.kube/astera-sh-oidc.yaml) if it is
-// not set, for kubectl.
-func kubeEnv() {
-	if os.Getenv("KUBECONFIG") == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			kc := filepath.Join(home, ".kube", "astera-sh-oidc.yaml")
-			if goalib.FileExists(kc) {
-				os.Setenv("KUBECONFIG", kc)
+// sets KUBECONFIG to [KubeParams.Kubeconfig] if it is set, or to the one
+// of actl for Astera if KUBECONFIG is not set (see [asteraEnv]).
+func (sr *Simmer) kubeEnv() {
+	if kc := sr.Project.Server.K8s.Kubeconfig; kc != "" {
+		if strings.HasPrefix(kc, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				kc = filepath.Join(home, kc[2:])
 			}
 		}
+		os.Setenv("KUBECONFIG", kc)
+	} else if sr.Project.Server.Server == Astera {
+		asteraEnv()
 	}
 	@0
 }
 
-// goalError returns the errors of the goal commands since [kubeStart]
-// (their messages are in the terminal).
+// goalError returns the errors of the goal commands since the start of
+// the operation (their messages are in the terminal).
 func goalError() error {
 	return errors.Join(goalrun.Errors...)
 }
 
-// kubeActl runs the given actl command in the namespace of the jobs, returning
-// its output. Its input is empty: it must not prompt.
-func (sr *Simmer) kubeActl(args ...string) (string, error) {
-	kubeEnv()
-	ns := sr.kubeNamespace()
-	out := $actl {args} -n {ns} --no-color < /dev/null$
-	return out, goalError()
-}
-
 // WriteKubeHelper writes the manifest of the helper pod, which only
-// mounts the shared volume, for kubectl exec to read the status files
-// and fetch the results. The shared (NFS) volumes mount only on the GPU
-// nodes of the pool (vp) of the namespace, which have its labels and
-// taints; it uses no GPU.
+// mounts the shared volume, for kubectl exec to upload the job files,
+// read the status files and fetch the results. It is scheduled as the
+// pods of the jobs (see [Simmer.kubeScheduling]), as the shared volume
+// may mount only on their nodes, but uses no GPU.
 func (sr *Simmer) WriteKubeHelper(w io.Writer) {
 	ns := sr.kubeNamespace()
 	fmt.Fprintf(w, "apiVersion: v1\nkind: Pod\nmetadata:\n")
@@ -140,10 +195,7 @@ func (sr *Simmer) WriteKubeHelper(w io.Writer) {
 	fmt.Fprintf(w, "    app.kubernetes.io/managed-by: simmer\n")
 	fmt.Fprintf(w, "    simmer/user: %s\n", kubeName(sr.Project.User))
 	fmt.Fprintf(w, "spec:\n  restartPolicy: Always\n  terminationGracePeriodSeconds: 1\n")
-	fmt.Fprintf(w, "  nodeSelector:\n    astera.org/pool: vp\n    astera.org/ns-%s: \"true\"\n", ns)
-	fmt.Fprintf(w, "  tolerations:\n")
-	fmt.Fprintf(w, "  - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}\n")
-	fmt.Fprintf(w, "  - {key: astera.org/namespace, operator: Exists, effect: NoSchedule}\n")
+	sr.writeKubeScheduling(w, "  ")
 	fmt.Fprintf(w, "  containers:\n  - name: data\n    image: alpine:3.21\n    command: [sleep, infinity]\n")
 	fmt.Fprintf(w, "    resources:\n      requests: {cpu: 10m, memory: 32Mi}\n      limits: {cpu: \"1\", memory: 512Mi}\n")
 	fmt.Fprintf(w, "    volumeMounts:\n    - name: shared\n      mountPath: %s\n", sr.kubeMount())
@@ -153,7 +205,7 @@ func (sr *Simmer) WriteKubeHelper(w io.Writer) {
 // kubeHelper makes sure that the helper pod is running, creating it if
 // it is not there, and returns its name.
 func (sr *Simmer) kubeHelper() (string, error) {
-	kubeEnv()
+	sr.kubeEnv()
 	ns := sr.kubeNamespace()
 	pod := sr.kubeHelperName()
 	jp := "jsonpath={.status.phase}"
@@ -200,30 +252,54 @@ func (sr *Simmer) kubeExecTo(script, file string) error {
 	return goalError()
 }
 
+// kubeExecFrom runs the given sh script in the helper pod, with its input
+// from the given local file.
+func (sr *Simmer) kubeExecFrom(script, file string) error {
+	pod, err := sr.kubeHelper()
+	if err != nil {
+		return err
+	}
+	ns := sr.kubeNamespace()
+	kubectl -n {ns} exec -i {pod} -- sh -c {script} < {file}
+	return goalError()
+}
+
 // shq quotes s for sh.
 func shq(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// WriteKubeScript writes the job.sbatch script that each worker of the job
+// kubeSourceDir returns the directory in the pods that has the job files:
+// for Kube, .src in the results directory, where simmer uploads them
+// (see [Simmer.kubeUpload]), and for Astera, the workspace of the Entry,
+// where actl uploads them.
+func (sr *Simmer) kubeSourceDir(jid string) string {
+	if sr.Project.Server.Server == Astera {
+		return "/home/dev/workspace"
+	}
+	return path.Join(sr.KubeJobPath(jid), ".src")
+}
+
+// WriteKubeScript writes the job.sbatch script that each pod of the job
 // runs: it runs the sim in the results directory on the shared volume,
-// for the run given by ACTL_WORKER_RANK, as the slurm array job does.
-// Worker 0 copies the job files there and builds the sim, once for all
-// (output in job.build), while the others wait for it: concurrent builds
-// would download the same modules into the shared Go module cache at
-// the same time, which fails. The worker writes job.<run>.start,
-// job.<run>.out and job.<run>.exit (its exit status), and the last one
-// to finish writes job.end: the status of the job is from these files.
+// for the run given by JOB_COMPLETION_INDEX (or ACTL_WORKER_RANK), as the
+// slurm array job does. Run 0 copies the job files there and builds the
+// sim, once for all (output in job.build), while the others wait for it:
+// concurrent builds would download the same modules into the shared Go
+// module cache at the same time, which fails. Each run writes
+// job.<run>.start, job.<run>.out and job.<run>.exit (its exit status), and
+// the last one to finish writes job.end: the status of the job is from
+// these files.
 func (sr *Simmer) WriteKubeScript(w io.Writer, jid, args string) {
 	pr := sr.Project
 	nruns := max(pr.Job.NRuns, 1)
 	gohome := path.Join(sr.kubeMount(), "simserver", ".go", kubeName(pr.User))
 	dateCmd := `date '+%Y-%m-%d %T %Z'`
 	fmt.Fprintf(w, "#!/bin/bash\n")
-	fmt.Fprintf(w, "# simmer job %s: run by each worker of the actl Queue Entry\n", jid)
+	fmt.Fprintf(w, "# simmer job %s: run by each pod of the job\n", jid)
 	fmt.Fprintf(w, "R=%s\n", shq(sr.KubeJobPath(jid)))
-	fmt.Fprintf(w, "WS=/home/dev/workspace\n")
-	fmt.Fprintf(w, "RUN=${ACTL_WORKER_RANK:-0}\n")
+	fmt.Fprintf(w, "WS=%s\n", shq(sr.kubeSourceDir(jid)))
+	fmt.Fprintf(w, "RUN=${JOB_COMPLETION_INDEX:-${ACTL_WORKER_RANK:-0}}\n")
 	fmt.Fprintf(w, "NRUNS=%d\n", nruns)
 	fmt.Fprintf(w, "export GOCACHE=%s GOMODCACHE=%s\n", shq(gohome+"/cache"), shq(gohome+"/mod"))
 	fmt.Fprintf(w, "export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp} # for glfw, which the sims link\n")
@@ -272,110 +348,128 @@ func (sr *Simmer) WriteKubeScript(w io.Writer, jid, args string) {
 	fmt.Fprintf(w, "finish $?\n")
 }
 
-// WriteKubeQueue writes the actl-queue.yaml file of the job's Entry.
-func (sr *Simmer) WriteKubeQueue(w io.Writer, jid string) {
+// WriteKubeJob writes the manifest of the Indexed Job of the given job,
+// with one pod per run, which runs job.sbatch from the uploaded job files.
+func (sr *Simmer) WriteKubeJob(w io.Writer, jid string) {
 	pr := sr.Project
 	k := &pr.Server.K8s
+	nruns := max(pr.Job.NRuns, 1)
 	cpus := max(pr.Job.CPUsPerTask, 1)
-	fmt.Fprintf(w, "# actl Queue Entry for simmer job %s (see https://actl.astera.sh)\n", jid)
-	fmt.Fprintf(w, "name: %s\n", sr.kubeEntryPrefix(jid))
-	fmt.Fprintf(w, "image: %s\n", k.Image)
-	if k.Pool != "" {
-		fmt.Fprintf(w, "pool: %s\n", k.Pool)
+	mem := max(pr.Job.Memory, 1) * cpus
+	gpus := max(pr.Job.GPUs, 0)
+	labels := sr.kubeLabels(jid)
+	fmt.Fprintf(w, "# Kubernetes Job of simmer job %s\n", jid)
+	fmt.Fprintf(w, "apiVersion: batch/v1\nkind: Job\nmetadata:\n")
+	fmt.Fprintf(w, "  name: %s\n  namespace: %s\n", sr.kubeJobName(jid), sr.kubeNamespace())
+	fmt.Fprintf(w, "  labels:\n")
+	for _, l := range labels {
+		fmt.Fprintf(w, "    %s: %q\n", l[0], l[1])
 	}
-	if k.Queue != "" {
-		fmt.Fprintf(w, "queue: %s\n", k.Queue)
+	fmt.Fprintf(w, "spec:\n")
+	fmt.Fprintf(w, "  completionMode: Indexed\n  completions: %d\n  parallelism: %d\n", nruns, nruns)
+	fmt.Fprintf(w, "  backoffLimit: 0 # the status is in the files: no retries\n")
+	fmt.Fprintf(w, "  template:\n    metadata:\n      labels:\n")
+	for _, l := range labels {
+		fmt.Fprintf(w, "        %s: %q\n", l[0], l[1])
 	}
-	fmt.Fprintf(w, "project:\n  path: .\n")
-	fmt.Fprintf(w, "resources:\n")
-	fmt.Fprintf(w, "  replicas: %d\n", max(pr.Job.NRuns, 1))
-	fmt.Fprintf(w, "  gpu: %d\n", max(pr.Job.GPUs, 0))
-	fmt.Fprintf(w, "  cpu: \"%d\"\n", cpus)
-	fmt.Fprintf(w, "  memory: %dGi\n", max(pr.Job.Memory, 1)*cpus)
-	fmt.Fprintf(w, "volumes:\n")
-	fmt.Fprintf(w, "  - name: shared\n    pvc: %s\n    mountPath: %s\n", sr.kubePVC(), sr.kubeMount())
-	fmt.Fprintf(w, "env:\n")
-	fmt.Fprintf(w, "  NVIDIA_DRIVER_CAPABILITIES: all # graphics, for Vulkan\n")
-	fmt.Fprintf(w, "  SIMMER_JOB: %s\n", jid)
-	fmt.Fprintf(w, "command: [bash, job.sbatch]\n")
+	fmt.Fprintf(w, "    spec:\n      restartPolicy: Never\n")
+	if k.SchedulerName != "" {
+		fmt.Fprintf(w, "      schedulerName: %s\n", k.SchedulerName)
+	}
+	if k.ServiceAccount != "" {
+		fmt.Fprintf(w, "      serviceAccountName: %s\n", k.ServiceAccount)
+	}
+	sr.writeKubeScheduling(w, "      ")
+	fmt.Fprintf(w, "      containers:\n      - name: sim\n        image: %s\n", k.Image)
+	fmt.Fprintf(w, "        command: [bash, %s]\n", path.Join(sr.kubeSourceDir(jid), "job.sbatch"))
+	fmt.Fprintf(w, "        env:\n")
+	fmt.Fprintf(w, "        - {name: NVIDIA_DRIVER_CAPABILITIES, value: all} # graphics, for Vulkan\n")
+	fmt.Fprintf(w, "        - {name: SIMMER_JOB, value: %s}\n", jid)
+	fmt.Fprintf(w, "        resources:\n")
+	fmt.Fprintf(w, "          requests: {cpu: \"%d\", memory: %dGi", cpus, mem)
+	if gpus > 0 {
+		fmt.Fprintf(w, ", nvidia.com/gpu: %d", gpus)
+	}
+	fmt.Fprintf(w, "}\n          limits: {memory: %dGi", mem)
+	if gpus > 0 {
+		fmt.Fprintf(w, ", nvidia.com/gpu: %d", gpus)
+	}
+	fmt.Fprintf(w, "}\n")
+	fmt.Fprintf(w, "        volumeMounts:\n        - name: shared\n          mountPath: %s\n", sr.kubeMount())
+	fmt.Fprintf(w, "      volumes:\n      - name: shared\n        persistentVolumeClaim:\n          claimName: %s\n", sr.kubePVC())
 }
 
-// SubmitKube submits the given job as an actl Queue Entry, from its local
+// SubmitKube submits the given job as a Kubernetes Job, from its local
 // job directory, which is the current one after, returning its name.
 func (sr *Simmer) SubmitKube(jid, args string) string {
-	entry, err := sr.kubeSubmit(jid, args)
+	name, err := sr.kubeSubmit(jid, args)
 	if err != nil {
 		core.ErrorSnackbar(sr, err)
 		return ""
 	}
 	sr.GetMeta(jid)
-	return entry
+	return name
 }
 
-// kubeSubmit writes the job files and submits the Entry of the given job,
-// from its local job directory, returning the name of the Entry, which it
-// also writes to job.job.
-func (sr *Simmer) kubeSubmit(jid, args string) (string, error) {
-	kubeStart()
+// kubeWriteJobFiles goes to the local directory of the given job, and
+// writes the job.nruns and job.sbatch files of the job there.
+func (sr *Simmer) kubeWriteJobFiles(jid, args string) error {
 	cd {sr.JobPath(jid)}
 	if sr.Project.Server.K8s.Image == "" || sr.kubeNamespace() == "" {
-		return "", errors.New("Kube jobs need the Server K8s Namespace and Image: set them with Edit project")
+		return errors.New("Kubernetes jobs need the Server K8s Namespace and Image: set them with Edit project")
 	}
 	goalib.WriteFile("job.nruns", strconv.Itoa(max(sr.Project.Job.NRuns, 1)))
 	var b bytes.Buffer
 	sr.WriteKubeScript(&b, jid, args)
-	if err := os.WriteFile("job.sbatch", b.Bytes(), 0755); err != nil {
+	return os.WriteFile("job.sbatch", b.Bytes(), 0755)
+}
+
+// kubeSubmit writes the job files of the given job, uploads them, and
+// applies its Job, returning its name, which it also writes to job.job.
+func (sr *Simmer) kubeSubmit(jid, args string) (string, error) {
+	sr.kubeStart()
+	if err := sr.kubeWriteJobFiles(jid, args); err != nil {
 		return "", err
 	}
-	b.Reset()
-	sr.WriteKubeQueue(&b, jid)
-	if err := os.WriteFile("actl-queue.yaml", b.Bytes(), 0644); err != nil {
+	var b bytes.Buffer
+	sr.WriteKubeJob(&b, jid)
+	if err := os.WriteFile("job.yaml", b.Bytes(), 0644); err != nil {
 		return "", err
 	}
-	out := $actl {sr.kubeSubmitArgs(false)} < /dev/null$
-	fmt.Println(out)
+	if err := sr.kubeUpload(jid); err != nil {
+		return "", err
+	}
+	ns := sr.kubeNamespace()
+	kubectl -n {ns} apply -f job.yaml
 	if err := goalError(); err != nil {
 		return "", err
 	}
-	// --no-attach prints the name of the Entry
-	prefix := sr.kubeEntryPrefix(jid)
-	entry := kubeEntryName(out, prefix)
-	if entry == "" { // look it up
-		list, _ := sr.kubeActl("queue", "list")
-		entry = kubeEntryName(list, prefix)
-	}
-	goalib.WriteFile("job.job", entry)
-	if entry == "" {
-		return "", fmt.Errorf("Submitted job %s, but could not find the name of its Entry in the output of actl queue submit", jid)
-	}
-	return entry, nil
+	name := sr.kubeJobName(jid)
+	goalib.WriteFile("job.job", name)
+	return name, nil
 }
 
-// kubeSubmitArgs returns the actl arguments to submit the Entry of the
-// job in the current directory, as a dry run if dryRun.
-func (sr *Simmer) kubeSubmitArgs(dryRun bool) []string {
-	args := []string{"queue", "submit", "--no-attach", "-f", "actl-queue.yaml", "-n", sr.kubeNamespace(), "--no-color"}
-	if dryRun {
-		args = append(args, "--dry-run")
+// kubeUpload uploads the files of the current (local job) directory to
+// the .src directory of the results directory of the given job on the
+// shared volume, through the helper pod, as a tar.gz.
+func (sr *Simmer) kubeUpload(jid string) error {
+	files, err := baremetal.AllFiles("./", ".*") // no .DS_Store etc
+	if err != nil {
+		return err
 	}
-	if sa := sr.Project.Server.K8s.ServiceAccount; sa != "" {
-		args = append(args, "--service-account", sa)
+	f, err := os.CreateTemp("", "simmer-*.tgz")
+	if err != nil {
+		return err
 	}
-	return args
-}
-
-// kubeEntryName returns the name of the Entry with the given prefix
-// in the given actl output, which is the last one, or "".
-func kubeEntryName(out, prefix string) string {
-	name := ""
-	for _, f := range strings.FieldsFunc(out, func(r rune) bool {
-		return !(r == '-' || r == '.' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9')
-	}) {
-		if strings.HasPrefix(f, prefix) {
-			name = strings.Trim(f, ".")
-		}
+	tgz := f.Name()
+	defer os.Remove(tgz)
+	err = baremetal.TarFiles(f, "./", true, files...)
+	f.Close()
+	if err != nil {
+		return err
 	}
-	return name
+	src := shq(sr.kubeSourceDir(jid))
+	return sr.kubeExecFrom("rm -rf "+src+" && mkdir -p "+src+" && cd "+src+" && tar xzf -", tgz)
 }
 
 // kubeJobFiles returns the names of the job.* files in the results
@@ -386,20 +480,25 @@ func (sr *Simmer) kubeJobFiles(jid string) ([]string, error) {
 }
 
 // JobStatusKube updates the status of the given job, in the current
-// (local job) directory, returning it: Pending, Running:n, Failed:n
-// (with n runs that failed, once all are done), or Done. The status is
-// from the job.<run>.start and job.<run>.exit files of the runs, and the
-// status of the Entry from actl, as its ServerStatus.
+// (local job) directory, returning it (see [Simmer.kubeRunsStatus]), with
+// the status of its Job from kubectl in job.squeue, as its ServerStatus.
 func (sr *Simmer) JobStatusKube(jid string) string {
-	kubeStart()
-	sstat := goalib.ReadFile("job.status")
-	eb, _ := os.ReadFile("job.job") // none if the submit failed
-	entry := strings.TrimSpace(string(eb))
-	if entry != "" {
+	sr.kubeStart()
+	if name := strings.TrimSpace(goalib.ReadFile("job.job")); name != "" {
 		ns := sr.kubeNamespace()
-		st := $[actl queue status {entry} -n {ns} --no-color < /dev/null]$
+		st := $[kubectl -n {ns} get job {name} --no-headers -o wide < /dev/null]$
 		goalib.WriteFile("job.squeue", strings.Join(strings.Fields(st), " "))
 	}
+	return sr.kubeRunsStatus(jid)
+}
+
+// kubeRunsStatus updates the status of the given job, in the current
+// (local job) directory, returning it: Pending, Running:n, Failed:n
+// (with n runs that failed, once all are done), or Done. The status is
+// from the job.<run>.start and job.<run>.exit files of the runs in its
+// results directory, whose job.start and job.end are copied.
+func (sr *Simmer) kubeRunsStatus(jid string) string {
+	sstat := goalib.ReadFile("job.status")
 	files, err := sr.kubeJobFiles(jid)
 	if err != nil {
 		core.ErrorSnackbar(sr, err)
@@ -454,7 +553,7 @@ func (sr *Simmer) JobStatusKube(jid string) string {
 // build and run output (job.build and job.<run>.out), which are small,
 // to see what went wrong.
 func (sr *Simmer) FetchJobKube(jid string, force bool) {
-	kubeStart()
+	sr.kubeStart()
 	jpath := sr.JobPath(jid)
 	sstat := goalib.ReadFile(filepath.Join(jpath, "job.status"))
 	if !force && sstat == "Fetched" {
@@ -488,18 +587,18 @@ func (sr *Simmer) FetchJobKube(jid string, force bool) {
 	}
 }
 
-// CancelJobsKube cancels the given jobs, by deleting their Entries.
-// Their results on the shared volume are kept.
+// CancelJobsKube cancels the given jobs, by deleting their Jobs, with
+// their pods. Their results on the shared volume are kept.
 func (sr *Simmer) CancelJobsKube(jobs []string) error {
 	var errs []error
 	ns := sr.kubeNamespace()
 	for _, jid := range jobs {
-		kubeStart() // each job is independent
-		entry := sr.ValueForJob(jid, "ServerJob")
-		if entry == "" {
+		sr.kubeStart() // each job is independent
+		name := sr.ValueForJob(jid, "ServerJob")
+		if name == "" {
 			continue
 		}
-		actl queue delete {entry} -n {ns} --yes --no-color < /dev/null
+		kubectl -n {ns} delete job {name} --ignore-not-found --wait=false < /dev/null
 		if err := goalError(); err != nil {
 			errs = append(errs, err)
 			continue
@@ -524,29 +623,45 @@ func (sr *Simmer) activeJobsKube(jobs []string) (active, others []string) {
 	return
 }
 
-// DeleteJobsKube deletes the results directories of the given jobs
-// on the shared volume, and their Entries (with their uploaded source).
+// DeleteJobsKube deletes the given jobs: their Jobs, if they are still
+// there, and their results directories on the shared volume.
 func (sr *Simmer) DeleteJobsKube(jobs []string) error {
 	var errs []error
 	ns := sr.kubeNamespace()
 	for _, jid := range jobs {
-		kubeStart() // each job is independent
-		if entry := sr.ValueForJob(jid, "ServerJob"); entry != "" {
-			[actl queue delete {entry} -n {ns} --yes --no-color < /dev/null] // already gone, typically
+		sr.kubeStart() // each job is independent
+		if name := sr.ValueForJob(jid, "ServerJob"); name != "" {
+			[kubectl -n {ns} delete job {name} --ignore-not-found --wait=false < /dev/null]
 		}
-		if _, err := sr.kubeExec("rm -rf " + shq(sr.KubeJobPath(jid))); err != nil {
+		if err := sr.kubeDeleteResults(jid); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
 }
 
-// QueueKube shows the Entries of the user and the pools of the namespace.
+// deleteJobsKube deletes the given jobs of the Kube or Astera server.
+func (sr *Simmer) deleteJobsKube(jobs []string) error {
+	if sr.Project.Server.Server == Astera {
+		return sr.DeleteJobsAstera(jobs)
+	}
+	return sr.DeleteJobsKube(jobs)
+}
+
+// kubeDeleteResults deletes the results directory of the given job on
+// the shared volume.
+func (sr *Simmer) kubeDeleteResults(jid string) error {
+	_, err := sr.kubeExec("rm -rf " + shq(sr.KubeJobPath(jid)))
+	return err
+}
+
+// QueueKube shows the Jobs and pods of the user in the namespace.
 func (sr *Simmer) QueueKube() {
-	kubeStart()
+	sr.kubeStart()
 	ts := sr.Tabs.AsLab()
 	ns := sr.kubeNamespace()
-	list := $[actl queue list -n {ns} --no-color < /dev/null]$
-	pools := $[actl queue pools -n {ns} --no-color < /dev/null]$
-	ts.EditorString("Queue", list+"\n"+strings.Repeat("#", 60)+"\n"+pools+"\n"+time.Now().Format(sr.Project.TimeFormat))
+	sel := "app.kubernetes.io/managed-by=simmer,simmer/user=" + kubeName(sr.Project.User)
+	jobs := $[kubectl -n {ns} get jobs -l {sel} -o wide < /dev/null]$
+	pods := $[kubectl -n {ns} get pods -l {sel} -o wide < /dev/null]$
+	ts.EditorString("Queue", jobs+"\n"+strings.Repeat("#", 60)+"\n"+pods+"\n"+time.Now().Format(sr.Project.TimeFormat))
 }

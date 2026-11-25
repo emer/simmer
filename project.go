@@ -377,10 +377,11 @@ func (sr *Simmer) connectBareMetal() error {
 	return sr.BareMetal.StartServer()
 }
 
-// connectSSH connects to the server of the project (see [Simmer.connectServer]).
+// connectSSH connects to the server of the project (see [Simmer.connectServer]),
+// except for Kube and Astera, whose commands run locally.
 func (sr *Simmer) connectSSH() error {
 	ssh := sr.Project.Server.SSH
-	if ssh == "" {
+	if st := sr.Project.Server.Server; ssh == "" || st == Kube || st == Astera {
 		return nil
 	}
 	if cl, ok := goalrun.SSHClients["1"]; ok {

@@ -147,6 +147,8 @@ func (sr *Simmer) Queue() { //types:add
 		sr.QueueSlurm()
 	case Kube:
 		sr.QueueKube()
+	case Astera:
+		sr.QueueAstera()
 	default: // BareMetal
 		sr.QueueBare()
 	}
@@ -212,6 +214,8 @@ func (sr *Simmer) JobStatus(jid string, force bool) {
 		}
 	case Kube:
 		sstat = sr.JobStatusKube(jid)
+	case Astera:
+		sstat = sr.JobStatusAstera(jid)
 	default: // BareMetal
 		jstr := strings.TrimSpace(goalrun.OutputErrOK("cat", "job.job"))
 		if jstr == "" {
@@ -322,7 +326,7 @@ func (sr *Simmer) FetchJob(jid string, force bool) {
 	switch sr.Project.Server.Server {
 	case Slurm:
 		sr.FetchJobSlurm(jid, force)
-	case Kube:
+	case Kube, Astera:
 		sr.FetchJobKube(jid, force)
 	default: // BareMetal
 		sr.FetchJobBare(jid, force)
@@ -366,6 +370,10 @@ func (sr *Simmer) Cancel() { //types:add
 			if err := sr.CancelJobsKube(jobs); err != nil {
 				core.ErrorSnackbar(sr, err)
 			}
+		case Astera:
+			if err := sr.CancelJobsAstera(jobs); err != nil {
+				core.ErrorSnackbar(sr, err)
+			}
 		default: // BareMetal
 			if err := sr.CancelJobsBare(jobs); err != nil {
 				core.ErrorSnackbar(sr, err)
@@ -385,7 +393,7 @@ func (sr *Simmer) cancelActiveJobs(jobs []string, action string) (others []strin
 	switch sr.Project.Server.Server {
 	case Slurm:
 		active, others = sr.activeJobsSlurm(jobs)
-	case Kube:
+	case Kube, Astera:
 		active, others = sr.activeJobsKube(jobs)
 	default: // BareMetal
 		active, others = sr.activeJobsBare(jobs)
@@ -398,6 +406,11 @@ func (sr *Simmer) cancelActiveJobs(jobs []string, action string) (others []strin
 		sr.CancelJobsSlurm(active)
 	case Kube:
 		if err := sr.CancelJobsKube(active); err != nil {
+			msg = fmt.Sprintf("Running jobs were not %s, and could not be canceled: %s: %v", action, strings.Join(active, " "), err)
+			return others, msg
+		}
+	case Astera:
+		if err := sr.CancelJobsAstera(active); err != nil {
 			msg = fmt.Sprintf("Running jobs were not %s, and could not be canceled: %s: %v", action, strings.Join(active, " "), err)
 			return others, msg
 		}
@@ -424,8 +437,8 @@ func (sr *Simmer) DeleteJobs(jobs []string) {
 	}
 	goalrun.Run("@0")
 	dpath := filepath.Join(sr.DataRoot, "jobs")
-	if sr.Project.Server.Server == Kube {
-		if err := sr.DeleteJobsKube(jobs); err != nil {
+	if st := sr.Project.Server.Server; st == Kube || st == Astera {
+		if err := sr.deleteJobsKube(jobs); err != nil {
 			core.ErrorSnackbar(sr, err)
 		}
 		for _, jid := range jobs {
@@ -482,8 +495,8 @@ func (sr *Simmer) ArchiveJobs(jobs []string) {
 	dpath := filepath.Join(sr.DataRoot, "jobs")
 	apath := filepath.Join(sr.DataRoot, "archive", "jobs")
 	goalrun.Run("mkdir", "-p", apath)
-	if sr.Project.Server.Server == Kube {
-		if err := sr.DeleteJobsKube(jobs); err != nil {
+	if st := sr.Project.Server.Server; st == Kube || st == Astera {
+		if err := sr.deleteJobsKube(jobs); err != nil {
 			core.ErrorSnackbar(sr, err)
 		}
 		for _, jid := range jobs {

@@ -32,6 +32,7 @@ func TestKubeLive(t *testing.T) {
 	}
 	sr := kubeTestSimmer()
 	sr.Project.Name = "simmertest"
+	sr.Project.Server.Server = Astera // for the scheduling of the helper pod
 	sr.Project.Server.K8s.Namespace = ns
 	sr.Project.FetchFiles = "*.tsv job.label"
 	sr.Project.Update()
