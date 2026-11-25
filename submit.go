@@ -249,15 +249,19 @@ func (sr *Simmer) Submit() { //types:add
 }
 
 // ParamSearch runs parameter search jobs, one for each parameter.
-// The number of parameters is obtained by running the currently built
+// The number of parameter searches is obtained by running the local
 // simulation executable locally with the -search-n argument, which
-// returns the total number of parameter searches to run.
+// prints the total number of parameter searches to run, optionally
+// followed by the label of each job, one per line (other output before
+// the number is skipped).
 // THUS, YOU MUST BUILD THE LOCAL SIM WITH THE PARAM SEARCH CONFIGURED.
 // Then, it launches that number of jobs with -search-at values from 1..n.
-// The jobs should write a job.label file for the searched parameter.
+// The jobs should write a job.label file for the searched parameter,
+// and the label of each job is set to that label from the start,
+// if the labels were printed.
+// See the emergent params README for how to set up a search.
 func (sr *Simmer) ParamSearch() { //types:add
 	lab.PromptStruct(sr, &sr.Project.Submit, "Submit a new param search: make sure local sim has been built with search configured!", func() {
-		sr.SaveProject() // the parameters of the last job
 		go sr.NewSearch(sr.Project.Submit)
 	})
 }
@@ -271,17 +275,8 @@ func (sr *Simmer) NewSearch(jp SubmitParams) {
 	proj := sr.Project.Name
 	lsim := filepath.Join(proj, proj)
 	nss := goalrun.Output(lsim, "-nogui", "-search-n")
-	sl := goalib.SplitLines(nss)
-	if len(sl) == 0 {
-		fmt.Println("Search: no output")
-		return
-	}
-	ns, err := strconv.Atoi(sl[0])
+	ns, labels, err := parseSearchN(nss)
 	if errors.Log(err) != nil {
-		return
-	}
-	if ns <= 0 {
-		fmt.Println("Number of search params <= 0:", ns)
 		return
 	}
 	fmt.Println("Param search launching jobs:", ns)
@@ -292,6 +287,38 @@ func (sr *Simmer) NewSearch(jp SubmitParams) {
 	for i := range ns {
 		cjp := jp
 		cjp.Args = sarg + fmt.Sprintf("-search-at %d", i+1)
+		if i < len(labels) {
+			cjp.Label = labels[i]
+		}
 		sr.NewJob(cjp)
 	}
+}
+
+// parseSearchN parses the output of a sim run with -search-n: the first
+// line that is an integer is the number of search jobs, and the lines
+// after it, if any, are the labels of the jobs (as the jobs save them
+// in job.label). Other output (e.g., from configuring the sim) before
+// the number is skipped.
+func parseSearchN(out string) (int, []string, error) {
+	sl := goalib.SplitLines(out)
+	for i, ln := range sl {
+		ns, err := strconv.Atoi(strings.TrimSpace(ln))
+		if err != nil {
+			continue
+		}
+		if ns <= 0 {
+			return 0, nil, fmt.Errorf("number of search params <= 0: %d", ns)
+		}
+		var labels []string
+		for _, l := range sl[i+1:] {
+			if l = strings.TrimSpace(l); l != "" {
+				labels = append(labels, l)
+			}
+		}
+		if len(labels) != ns {
+			labels = nil
+		}
+		return ns, labels, nil
+	}
+	return 0, nil, fmt.Errorf("search: no number of search params in the -search-n output: %q", out)
 }
