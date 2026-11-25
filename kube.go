@@ -678,9 +678,12 @@ func (sr *Simmer) deleteJobsKube(jobs []string) error {
 }
 
 // kubeDeleteResults deletes the results directory of the given job on
-// the shared volume.
+// the shared volume. On NFS, rm -rf can leave some files of a directory,
+// whose listing skips entries as they are deleted ("Directory not empty"),
+// so it tries again, a few times.
 func (sr *Simmer) kubeDeleteResults(jid string) error {
-	_, err := sr.kubeExec("rm -rf " + shq(sr.KubeJobPath(jid)))
+	r := shq(sr.KubeJobPath(jid))
+	_, err := sr.kubeExec(fmt.Sprintf("for i in 1 2 3 4; do rm -rf %s 2>/dev/null; [ -e %s ] || exit 0; sleep 1; done; rm -rf %s", r, r, r))
 	return err
 }
 
