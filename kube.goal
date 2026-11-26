@@ -535,7 +535,7 @@ func (sr *Simmer) kubeSubmit(jid, args string) (string, error) {
 		return "", err
 	}
 	name := sr.kubeJobName(jid)
-	goalib.WriteFile("job.job", name)
+	goalib.WriteFile(filepath.Join(sr.JobPath(jid), "job.job"), name) // full path: see asteraSubmit
 	return name, nil
 }
 

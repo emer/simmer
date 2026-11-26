@@ -7,6 +7,7 @@ package main
 //go:generate core generate -add-types -add-funcs
 
 import (
+	_ "embed"
 	"image"
 	"maps"
 	"os"
@@ -33,6 +34,9 @@ import (
 	"cogentcore.org/lab/tensorcore"
 	"github.com/emer/simmer/baremetal"
 )
+
+//go:embed icon.svg
+var appIcon string
 
 // goalrun is needed for running goal commands.
 var goalrun *goal.Goal
@@ -102,6 +106,7 @@ type Simmer struct {
 var startProject string
 
 func main() {
+	core.AppIcon = appIcon
 	startProject = projectArg()
 	opts := cli.DefaultOptions("simmer", "interactive simulation running and data analysis.")
 	cfg := &interpreter.Config{}

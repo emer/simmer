@@ -131,7 +131,9 @@ func (sr *Simmer) asteraSubmit(jid, args string) (string, error) {
 		list, _ := sr.asteraActl("queue", "list")
 		entry = asteraEntryName(list, prefix)
 	}
-	goalib.WriteFile("job.job", entry)
+	// the full path: another operation can change the working directory
+	// while actl runs (a job.job written elsewhere loses the job's status)
+	goalib.WriteFile(filepath.Join(sr.JobPath(jid), "job.job"), entry)
 	if entry == "" {
 		return "", fmt.Errorf("Submitted job %s, but could not find the name of its Entry in the output of actl queue submit", jid)
 	}
